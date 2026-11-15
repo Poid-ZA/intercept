@@ -367,6 +367,22 @@ def _get_git_status() -> dict[str, Any]:
         return {"has_changes": False, "changed_files": [], "current_branch": "unknown", "error": str(e)}
 
 
+def _upstream_remote_and_branch(repo_root: str, branch: str) -> tuple[str, str]:
+    """Remote and remote branch that `branch` tracks; origin/<branch> when unset."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        capture_output=True,
+        text=True,
+        timeout=5,
+        cwd=repo_root,
+    )
+    upstream = result.stdout.strip()
+    if result.returncode != 0 or "/" not in upstream:
+        return "origin", branch
+    remote, _, remote_branch = upstream.partition("/")
+    return remote, remote_branch
+
+
 def perform_update(stash_changes: bool = False) -> dict[str, Any]:
     """
     Perform a git pull to update the application.
@@ -425,9 +441,11 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
 
                 req_hash_before = hashlib.md5(f.read()).hexdigest()
 
-        # Fetch latest changes
+        # Fetch from the remote this branch tracks, not always "origin"
+        branch = git_status.get("current_branch", "main")
+        remote, remote_branch = _upstream_remote_and_branch(repo_root, branch)
         fetch_result = subprocess.run(
-            ["git", "fetch", "origin"], capture_output=True, text=True, timeout=60, cwd=repo_root
+            ["git", "fetch", remote], capture_output=True, text=True, timeout=60, cwd=repo_root
         )
 
         if fetch_result.returncode != 0:
@@ -436,12 +454,9 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
                 subprocess.run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
             return {"success": False, "error": "Failed to fetch updates", "details": fetch_result.stderr}
 
-        # Get the main branch name
-        branch = git_status.get("current_branch", "main")
-
         # Pull changes
         pull_result = subprocess.run(
-            ["git", "pull", "origin", branch], capture_output=True, text=True, timeout=120, cwd=repo_root
+            ["git", "pull", remote, remote_branch], capture_output=True, text=True, timeout=120, cwd=repo_root
         )
 
         if pull_result.returncode != 0:

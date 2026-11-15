@@ -163,8 +163,18 @@ def _not_executable(path, mode, *args, **kwargs):
     return _real_access(path, mode, *args, **kwargs)
 
 
+def _forget_weather_sat_detection() -> None:
+    # The weather decoder is a process singleton that caches what it found on
+    # first detection. Drop that cache so each case detects under its own patches.
+    from utils import weather_sat
+
+    if weather_sat._decoder is not None:
+        weather_sat._decoder._decoder = None
+
+
 @contextmanager
 def _decoders(installed: bool):
+    _forget_weather_sat_detection()
     FakeProcess.instances.clear()
     patches = [
         patch("subprocess.Popen", FakeProcess if installed else _missing),
@@ -191,6 +201,7 @@ def _decoders(installed: bool):
         for p in reversed(patches):
             p.stop()
         FakeProcess.startup_output = {}
+        _forget_weather_sat_detection()
 
 
 @pytest.fixture

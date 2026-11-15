@@ -79,3 +79,31 @@ def test_stale_cached_latest_is_not_shown(github):
     result = updater.check_for_updates()
     assert result["latest_version"] == "2.33.75"
     assert result["cached"] is False
+
+
+def _git(repo, *args):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+
+
+def test_upstream_remote_follows_tracking_branch(tmp_path):
+    """A feature branch tracking `fork` must fetch and pull from `fork`, not `origin`."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "feat/x")
+    _git(repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "c")
+    _git(repo, "remote", "add", "fork", "https://example.invalid/fork.git")
+    _git(repo, "update-ref", "refs/remotes/fork/feat/x", "HEAD")
+    _git(repo, "config", "branch.feat/x.remote", "fork")
+    _git(repo, "config", "branch.feat/x.merge", "refs/heads/feat/x")
+
+    assert updater._upstream_remote_and_branch(str(repo), "feat/x") == ("fork", "feat/x")
+
+
+def test_upstream_defaults_to_origin_without_tracking(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+
+    assert updater._upstream_remote_and_branch(str(repo), "main") == ("origin", "main")
