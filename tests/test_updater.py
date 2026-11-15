@@ -107,3 +107,17 @@ def test_upstream_defaults_to_origin_without_tracking(tmp_path):
     _git(repo, "init", "-q", "-b", "main")
 
     assert updater._upstream_remote_and_branch(str(repo), "main") == ("origin", "main")
+
+
+def test_git_runs_as_repo_owner_when_root(tmp_path, monkeypatch):
+    """Root must run git as the repo owner, or the update leaves root-owned files in .git."""
+    seen = {}
+    monkeypatch.setattr(updater.os, "geteuid", lambda: 0)
+    monkeypatch.setattr(updater.subprocess, "run", lambda cmd, **kw: seen.update(kw) or "ran")
+
+    assert updater._git_run(["git", "status"], cwd=str(tmp_path), capture_output=True) == "ran"
+
+    st = tmp_path.stat()
+    assert seen["user"] == st.st_uid
+    assert seen["group"] == st.st_gid
+    assert seen["env"]["HOME"]

@@ -8,6 +8,7 @@ import contextlib
 import json
 import logging
 import os
+import pwd
 import re
 import subprocess
 import sys
@@ -21,6 +22,24 @@ import config
 from utils.database import get_setting, set_setting
 
 logger = logging.getLogger("intercept.updater")
+
+
+def _git_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess:
+    """Run git as the repo owner when this process is root.
+
+    The service runs as root. Git run as root writes root-owned objects into
+    .git, and the owner's own git then fails on them. Running as the owner keeps
+    everything the update writes owned by the owner.
+    """
+    if os.geteuid() == 0:
+        st = os.stat(kwargs.get("cwd") or os.getcwd())
+        owner = pwd.getpwuid(st.st_uid)
+        kwargs.setdefault("user", st.st_uid)
+        kwargs.setdefault("group", st.st_gid)
+        kwargs.setdefault(
+            "env", {**os.environ, "HOME": owner.pw_dir, "USER": owner.pw_name, "LOGNAME": owner.pw_name}
+        )
+    return subprocess.run(cmd, **kwargs)
 
 # Cache keys for settings
 CACHE_KEY_LAST_CHECK = "update.last_check"
@@ -326,7 +345,7 @@ def dismiss_update(version: str) -> dict[str, Any]:
 def _is_git_repo() -> bool:
     """Check if the current directory is a git repository."""
     try:
-        result = subprocess.run(
+        result = _git_run(
             ["git", "rev-parse", "--is-inside-work-tree"],
             capture_output=True,
             text=True,
@@ -344,7 +363,7 @@ def _get_git_status() -> dict[str, Any]:
 
     try:
         # Check for uncommitted changes
-        result = subprocess.run(
+        result = _git_run(
             ["git", "status", "--porcelain"], capture_output=True, text=True, timeout=10, cwd=repo_root
         )
 
@@ -352,7 +371,7 @@ def _get_git_status() -> dict[str, Any]:
         changed_files = result.stdout.strip().split("\n") if has_changes else []
 
         # Get current branch
-        branch_result = subprocess.run(
+        branch_result = _git_run(
             ["git", "branch", "--show-current"], capture_output=True, text=True, timeout=5, cwd=repo_root
         )
         current_branch = branch_result.stdout.strip() or "main"
@@ -369,7 +388,7 @@ def _get_git_status() -> dict[str, Any]:
 
 def _upstream_remote_and_branch(repo_root: str, branch: str) -> tuple[str, str]:
     """Remote and remote branch that `branch` tracks; origin/<branch> when unset."""
-    result = subprocess.run(
+    result = _git_run(
         ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
         capture_output=True,
         text=True,
@@ -419,7 +438,7 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
         # Stash changes if requested
         stashed = False
         if stash_changes and git_status["has_changes"]:
-            stash_result = subprocess.run(
+            stash_result = _git_run(
                 ["git", "stash", "push", "-m", "INTERCEPT auto-stash before update"],
                 capture_output=True,
                 text=True,
@@ -444,18 +463,18 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
         # Fetch from the remote this branch tracks, not always "origin"
         branch = git_status.get("current_branch", "main")
         remote, remote_branch = _upstream_remote_and_branch(repo_root, branch)
-        fetch_result = subprocess.run(
+        fetch_result = _git_run(
             ["git", "fetch", remote], capture_output=True, text=True, timeout=60, cwd=repo_root
         )
 
         if fetch_result.returncode != 0:
             # Restore stash if we stashed
             if stashed:
-                subprocess.run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
+                _git_run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
             return {"success": False, "error": "Failed to fetch updates", "details": fetch_result.stderr}
 
         # Pull changes
-        pull_result = subprocess.run(
+        pull_result = _git_run(
             ["git", "pull", remote, remote_branch], capture_output=True, text=True, timeout=120, cwd=repo_root
         )
 
@@ -463,10 +482,10 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
             # Check for merge conflict
             if "CONFLICT" in pull_result.stdout or "CONFLICT" in pull_result.stderr:
                 # Abort merge
-                subprocess.run(["git", "merge", "--abort"], cwd=repo_root, timeout=30)
+                _git_run(["git", "merge", "--abort"], cwd=repo_root, timeout=30)
                 # Restore stash if we stashed
                 if stashed:
-                    subprocess.run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
+                    _git_run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
                 return {
                     "success": False,
                     "error": "merge_conflict",
@@ -476,12 +495,12 @@ def perform_update(stash_changes: bool = False) -> dict[str, Any]:
 
             # Restore stash if we stashed
             if stashed:
-                subprocess.run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
+                _git_run(["git", "stash", "pop"], cwd=repo_root, timeout=30)
             return {"success": False, "error": "Failed to pull updates", "details": pull_result.stderr}
 
         # Restore stashed changes
         if stashed:
-            stash_pop_result = subprocess.run(
+            stash_pop_result = _git_run(
                 ["git", "stash", "pop"], capture_output=True, text=True, timeout=30, cwd=repo_root
             )
             if stash_pop_result.returncode != 0:
