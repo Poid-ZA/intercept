@@ -557,7 +557,7 @@ def logout():
 
 
 @app.route("/login", methods=["GET", "POST"])
-@limiter.limit("5 per minute")  # Limit to 5 login attempts per minute per IP
+@limiter.limit("5 per minute", methods=["POST"])  # Limit to 5 login attempts per minute per IP; GET page loads don't count
 def login():
     if request.method == "POST":
         username = request.form.get("username")

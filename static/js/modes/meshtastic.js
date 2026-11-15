@@ -123,41 +123,17 @@ const Meshtastic = (function() {
         const mapContainer = document.getElementById('meshMap');
         if (!mapContainer) return;
 
-        // Default to center of US
-        const defaultLat = 39.8283;
-        const defaultLon = -98.5795;
+        if (typeof MapUtils === 'undefined') return;
 
-        meshMap = L.map('meshMap').setView([defaultLat, defaultLon], 4);
+        // MapUtils.init() paints a zero-network canvas grid immediately, then
+        // upgrades to the configured tile provider async — no eager fetch to
+        // an external CDN on mode load (that fetch was the main contributor
+        // to this mode feeling slow to open).
+        meshMap = MapUtils.init('meshMap', { center: [39.8283, -98.5795], zoom: 4 });
+        if (!meshMap) return;
         window.meshMap = meshMap;
 
-        // Add fallback tiles immediately so the map is visible instantly. If Settings
-        // already loaded elsewhere this session, use it directly instead — avoids a
-        // flash of the unkeyed CartoDB URL when a CARTO API key has been configured.
-        const fallbackTiles = (typeof Settings !== 'undefined' && Settings._initialized && Settings.createTileLayer)
-            ? Settings.createTileLayer().addTo(meshMap)
-            : L.tileLayer('https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-                maxZoom: 19,
-                subdomains: 'abcd',
-                className: 'tile-layer-cyan'
-            }).addTo(meshMap);
-
-        // Upgrade tiles in background via Settings (with timeout fallback)
-        if (typeof Settings !== 'undefined') {
-            try {
-                await Promise.race([
-                    Settings.init(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Settings timeout')), 5000))
-                ]);
-                meshMap.removeLayer(fallbackTiles);
-                Settings.createTileLayer().addTo(meshMap);
-                Settings.registerMap(meshMap);
-            } catch (e) {
-                console.warn('Meshtastic: Settings init failed/timed out, using fallback tiles:', e);
-            }
-        }
-
-        if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(meshMap);
+        MapUtils.addGraticuleControl(meshMap);
 
         // Handle resize
         setTimeout(() => {

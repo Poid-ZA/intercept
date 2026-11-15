@@ -704,7 +704,6 @@ def parse_sbs_stream(service_addr):
 
     logger.info(f"SBS stream parser started, connecting to {host}:{port}")
     adsb_connected = False
-    adsb_messages_received = 0
     _sbs_error_logged = False
 
     while adsb_using_service:
@@ -722,6 +721,8 @@ def parse_sbs_stream(service_addr):
             pending_updates = set()
             adsb_bytes_received = 0
             adsb_lines_received = 0
+            adsb_messages_received = 0
+            adsb_last_message_time = None
 
             def flush_pending_updates(force: bool = False) -> None:
                 nonlocal last_update

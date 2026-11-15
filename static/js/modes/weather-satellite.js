@@ -1042,7 +1042,7 @@ const WeatherSat = (function() {
     async function initGroundMap() {
         const container = document.getElementById('wxsatGroundMap');
         if (!container) return;
-        if (typeof L === 'undefined') return;
+        if (typeof MapUtils === 'undefined') return;
         const observer = getObserverCoords();
         const defaultCenter = observer
             ? [Math.max(-85, Math.min(85, observer.lat)), normalizeLon(observer.lon)]
@@ -1050,7 +1050,10 @@ const WeatherSat = (function() {
         const defaultZoom = 1;
 
         if (!groundMap) {
-            groundMap = L.map(container, {
+            // MapUtils.init() paints a zero-network canvas grid immediately,
+            // then upgrades to the configured tile provider async — no eager
+            // fetch to an external CDN on mode load.
+            groundMap = MapUtils.init('wxsatGroundMap', {
                 center: defaultCenter,
                 zoom: defaultZoom,
                 minZoom: 1,
@@ -1060,36 +1063,9 @@ const WeatherSat = (function() {
                 worldCopyJump: true,
                 preferCanvas: true,
             });
+            if (!groundMap) return;
 
-            // Add fallback tiles immediately so the map is visible instantly. If Settings
-            // already loaded elsewhere this session, use it directly instead — avoids a
-            // flash of the unkeyed CartoDB URL when a CARTO API key has been configured.
-            const fallbackTiles = (typeof Settings !== 'undefined' && Settings._initialized && Settings.createTileLayer)
-                ? Settings.createTileLayer().addTo(groundMap)
-                : L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                    subdomains: 'abcd',
-                    maxZoom: 18,
-                    noWrap: false,
-                    crossOrigin: true,
-                    className: 'tile-layer-cyan',
-                }).addTo(groundMap);
-
-            // Upgrade tiles in background via Settings (with timeout fallback)
-            if (typeof Settings !== 'undefined' && Settings.createTileLayer) {
-                try {
-                    await Promise.race([
-                        Settings.init(),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('Settings timeout')), 5000))
-                    ]);
-                    groundMap.removeLayer(fallbackTiles);
-                    Settings.createTileLayer().addTo(groundMap);
-                    Settings.registerMap(groundMap);
-                } catch (e) {
-                    console.warn('WeatherSat: Settings init failed/timed out, using fallback tiles:', e);
-                }
-            }
-
-            if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(groundMap);
+            MapUtils.addGraticuleControl(groundMap);
 
             groundTrackLayer = L.layerGroup().addTo(groundMap);
             groundOverlayLayer = L.layerGroup().addTo(groundMap);

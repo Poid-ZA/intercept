@@ -26,6 +26,8 @@ const MapUtils = {
      * @param {number}   [options.maxZoom=18]
      * @param {boolean}  [options.zoomControl=true]
      * @param {boolean}  [options.attributionControl=true]
+     * @param {*}        [options.*] - any other Leaflet Map option (e.g.
+     *   worldCopyJump, maxBounds, maxBoundsViscosity) is passed through as-is.
      * @returns {L.Map|null}
      */
     init(containerId, options = {}) {
@@ -35,6 +37,7 @@ const MapUtils = {
         if (container._leaflet_id) return null;
 
         const map = L.map(containerId, {
+            ...options,
             center:              options.center              || [20, 0],
             zoom:                options.zoom                ?? 4,
             minZoom:             options.minZoom             ?? 2,

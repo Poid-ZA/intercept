@@ -39,40 +39,15 @@ var DroneMode = (function () {
     function _initMap() {
         if (_map) return;
         var mapEl = document.getElementById('droneMainMap');
-        if (!mapEl || typeof L === 'undefined') return;
-        // Open on the observer, not the whole world: contacts are local.
-        // 0,0 is the unset default (DEFAULT_LAT/LON), not a place to look.
-        var home = typeof ObserverLocation !== 'undefined' && ObserverLocation.getShared ? ObserverLocation.getShared() : null;
-        if (home && home.lat === 0 && home.lon === 0) home = null;
-        _map = L.map('droneMainMap', { zoomControl: true }).setView(home ? [home.lat, home.lon] : [20, 0], home ? 12 : 2);
+        if (!mapEl || typeof MapUtils === 'undefined') return;
 
-        var hasSettings = typeof Settings !== 'undefined' && Settings.createTileLayer;
-        if (hasSettings && Settings._initialized) {
-            // Settings already loaded elsewhere this session — use it directly so a
-            // configured CARTO API key is applied immediately (no unkeyed flash).
-            Settings.createTileLayer().addTo(_map);
-            Settings.registerMap(_map);
-        } else {
-            var fallbackTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-                maxZoom: 19,
-            }).addTo(_map);
+        // MapUtils.init() paints a zero-network canvas grid immediately, then
+        // upgrades to the configured tile provider async — no eager fetch to
+        // an external CDN on mode load.
+        _map = MapUtils.init('droneMainMap', { center: [20, 0], zoom: 2 });
+        if (!_map) return;
 
-            if (hasSettings) {
-                Promise.race([
-                    Settings.init(),
-                    new Promise(function (_, reject) { setTimeout(function () { reject(new Error('Settings timeout')); }, 5000); })
-                ]).then(function () {
-                    _map.removeLayer(fallbackTiles);
-                    Settings.createTileLayer().addTo(_map);
-                    Settings.registerMap(_map);
-                }).catch(function (e) {
-                    console.warn('Drone: Settings init failed/timed out, using fallback tiles:', e);
-                });
-            }
-        }
-
-        if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(_map);
+        MapUtils.addGraticuleControl(_map);
     }
 
     function _connectSSE() {

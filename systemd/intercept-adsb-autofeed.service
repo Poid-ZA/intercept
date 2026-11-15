@@ -1,0 +1,11 @@
+[Unit]
+Description=Point INTERCEPT's ADS-B tracking at adsb-pi's current dump1090-fa SBS feed
+After=intercept.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/opt/intercept/adsb-autofeed.env
+ExecStart=/opt/intercept/bin/adsb-autofeed-locate.sh
+
+[Install]
+WantedBy=multi-user.target

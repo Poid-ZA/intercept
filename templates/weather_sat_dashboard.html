@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WEATHER SAT // INTERCEPT - Weather Satellite</title>
+    <script>(function(){var t=localStorage.getItem('intercept-ui-tier')||'enhanced';document.documentElement.setAttribute('data-ui-tier',t);})();</script>
+    <!-- Dedicated dashboards always use bundled assets so navigation is not
+         blocked by external CDN reachability (see ais_dashboard.html). -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/fonts-local.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/variables.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/map-utils.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/modes/weather-satellite.css') }}">
+    <script defer src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+    <style>
+        html, body { height: 100%; margin: 0; }
+        body.wxsat-dash { display: flex; flex-direction: column; height: 100vh; }
+        .wxsat-dash-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 16px; border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary); flex: 0 0 auto;
+        }
+        .wxsat-dash-logo { font-family: var(--font-mono); font-weight: 700; letter-spacing: 0.05em; color: var(--text-primary); }
+        .wxsat-dash-logo span { color: var(--text-dim); font-weight: 400; }
+        .wxsat-dash-body { display: flex; flex: 1; min-height: 0; }
+        .wxsat-dash-main { flex: 1; min-width: 0; display: flex; flex-direction: column; overflow-y: auto; }
+        .wxsat-dash-sidebar { width: 300px; flex: 0 0 300px; overflow-y: auto; padding: 12px; border-left: 1px solid var(--border-color); background: var(--bg-secondary); }
+        /* The options partial and visuals block are normally shown/hidden by
+           the SPA's switchMode(); this page is single-mode, so force them on. */
+        #weatherSatMode { display: block; }
+        #weatherSatVisuals { display: flex !important; }
+        @media (max-width: 900px) {
+            .wxsat-dash-body { flex-direction: column; }
+            .wxsat-dash-sidebar { width: auto; flex: 0 0 auto; border-left: none; border-top: 1px solid var(--border-color); }
+        }
+    </style>
+</head>
+<body class="wxsat-dash" data-mode="weathersat">
+    <div class="wxsat-dash-header">
+        <div class="wxsat-dash-logo">WEATHER SAT <span>// INTERCEPT - Weather Satellite</span></div>
+        {% if not embedded %}
+        <a href="/?mode=weathersat" class="nav-dashboard-btn" style="text-decoration:none;" title="Return to Main Dashboard">Main Dashboard</a>
+        {% endif %}
+    </div>
+
+    <div class="wxsat-dash-body">
+        <div class="wxsat-dash-main">
+            <!-- Weather Satellite visuals (pass predictions + image gallery) -->
+            <div id="weatherSatVisuals" class="wxsat-visuals-container" style="display: none;">
+                <!-- Stats strip -->
+                <div class="wxsat-stats-strip">
+                    <div class="wxsat-strip-group">
+                        <div class="wxsat-strip-status">
+                            <span class="wxsat-strip-dot" id="wxsatStripDot"></span>
+                            <span class="wxsat-strip-status-text" id="wxsatStripStatus">Idle</span>
+                        </div>
+                        <button class="wxsat-strip-btn start" id="wxsatStartBtn" onclick="WeatherSat.start()">Start</button>
+                        <button class="wxsat-strip-btn stop" id="wxsatStopBtn" onclick="WeatherSat.stop()" style="display: none;">Stop</button>
+                    </div>
+                    <div class="wxsat-strip-divider"></div>
+                    <div class="wxsat-strip-group">
+                        <div class="wxsat-strip-stat">
+                            <span class="wxsat-strip-value accent-cyan" id="wxsatStripFreq">--</span>
+                            <span class="wxsat-strip-label">MHZ</span>
+                        </div>
+                        <div class="wxsat-strip-stat">
+                            <span class="wxsat-strip-value" id="wxsatStripMode">--</span>
+                            <span class="wxsat-strip-label">MODE</span>
+                        </div>
+                        <div class="wxsat-strip-stat">
+                            <span class="wxsat-strip-value" id="wxsatStripImageCount">0</span>
+                            <span class="wxsat-strip-label">IMAGES</span>
+                        </div>
+                    </div>
+                    <div class="wxsat-strip-divider"></div>
+                    <div class="wxsat-strip-group">
+                        <div class="wxsat-strip-location">
+                            <span class="wxsat-strip-label" style="margin-right: 6px;">LOC</span>
+                            <input type="number" id="wxsatObsLat" class="wxsat-loc-input" step="0.0001" placeholder="Lat" title="Latitude">
+                            <input type="number" id="wxsatObsLon" class="wxsat-loc-input" step="0.0001" placeholder="Lon" title="Longitude">
+                            <button class="wxsat-strip-btn gps" onclick="WeatherSat.useGPS(this)" title="Use GPS location">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/></svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="wxsat-strip-divider"></div>
+                    <div class="wxsat-strip-group">
+                        <div class="wxsat-strip-stat">
+                            <span class="wxsat-strip-value" id="wxsatStripPassCount">0</span>
+                            <span class="wxsat-strip-label">PASSES</span>
+                        </div>
+                    </div>
+                    <div class="wxsat-strip-divider"></div>
+                    <div class="wxsat-strip-group">
+                        <span class="wxsat-strip-label" style="margin-right: 4px;">TZ</span>
+                        <select id="wxsatTimezone" class="wxsat-tz-select" onchange="WeatherSat.setTimezone(this.value)">
+                            <option value="UTC">UTC</option>
+                            <option value="local">Local</option>
+                            <option value="US/Eastern">Eastern</option>
+                            <option value="US/Central">Central</option>
+                            <option value="US/Mountain">Mountain</option>
+                            <option value="US/Pacific">Pacific</option>
+                        </select>
+                    </div>
+                    <div class="wxsat-strip-divider"></div>
+                    <div class="wxsat-strip-group">
+                        <label class="wxsat-schedule-toggle" title="Auto-capture passes">
+                            <input type="checkbox" id="wxsatAutoSchedule" onchange="WeatherSat.toggleScheduler(this)">
+                            <span class="wxsat-toggle-label">AUTO</span>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Countdown + Timeline -->
+                <div class="wxsat-countdown-bar">
+                    <div class="wxsat-countdown-next">
+                        <div class="wxsat-countdown-boxes" id="wxsatCountdownBoxes">
+                            <div class="wxsat-countdown-box"><span class="wxsat-cd-value" id="wxsatCdDays">--</span><span class="wxsat-cd-unit">DAYS</span></div>
+                            <div class="wxsat-countdown-box"><span class="wxsat-cd-value" id="wxsatCdHours">--</span><span class="wxsat-cd-unit">HRS</span></div>
+                            <div class="wxsat-countdown-box"><span class="wxsat-cd-value" id="wxsatCdMins">--</span><span class="wxsat-cd-unit">MIN</span></div>
+                            <div class="wxsat-countdown-box"><span class="wxsat-cd-value" id="wxsatCdSecs">--</span><span class="wxsat-cd-unit">SEC</span></div>
+                        </div>
+                        <div class="wxsat-countdown-info" id="wxsatCountdownInfo">
+                            <span class="wxsat-countdown-sat" id="wxsatCountdownSat">--</span>
+                            <span class="wxsat-countdown-detail" id="wxsatCountdownDetail">No passes predicted</span>
+                        </div>
+                    </div>
+                    <div class="wxsat-timeline" id="wxsatTimeline">
+                        <div class="wxsat-timeline-track" id="wxsatTimelineTrack"></div>
+                        <div class="wxsat-timeline-cursor" id="wxsatTimelineCursor"></div>
+                        <div class="wxsat-timeline-labels">
+                            <span>00:00</span><span>06:00</span><span>12:00</span><span>18:00</span><span>24:00</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Pass Analysis Bar -->
+                <div class="wxsat-analysis-bar" id="wxsatAnalysisBar">
+                    <div class="wxsat-analysis-stats">
+                        <div class="wxsat-analysis-stat">
+                            <span class="wxsat-analysis-value" id="wxsatAnalysisTotal">0</span>
+                            <span class="wxsat-analysis-label">24h passes</span>
+                        </div>
+                        <div class="wxsat-analysis-stat">
+                            <span class="wxsat-analysis-value excellent" id="wxsatAnalysisExcellent">0</span>
+                            <span class="wxsat-analysis-label">excellent</span>
+                        </div>
+                        <div class="wxsat-analysis-stat">
+                            <span class="wxsat-analysis-value good" id="wxsatAnalysisGood">0</span>
+                            <span class="wxsat-analysis-label">good</span>
+                        </div>
+                        <div class="wxsat-analysis-stat">
+                            <span class="wxsat-analysis-value fair" id="wxsatAnalysisFair">0</span>
+                            <span class="wxsat-analysis-label">fair</span>
+                        </div>
+                    </div>
+                    <div class="wxsat-analysis-best" id="wxsatAnalysisBest">--</div>
+                </div>
+
+                <!-- Capture progress -->
+                <div class="wxsat-capture-status" id="wxsatCaptureStatus">
+                    <div class="wxsat-capture-info">
+                        <span class="wxsat-capture-message" id="wxsatCaptureMsg">--</span>
+                        <span class="wxsat-capture-elapsed" id="wxsatCaptureElapsed">0:00</span>
+                    </div>
+                    <div class="wxsat-progress-bar">
+                        <div class="progress" id="wxsatProgressFill" style="width: 0%"></div>
+                    </div>
+                </div>
+
+                <!-- Decoder Console -->
+                <div class="wxsat-signal-console" id="wxsatSignalConsole">
+                    <div class="wxsat-console-header">
+                        <div class="wxsat-console-title-group">
+                            <span class="wxsat-console-title">DECODER CONSOLE</span>
+                            <div class="wxsat-phase-indicator" id="wxsatPhaseIndicator">
+                                <span class="wxsat-phase-step" data-phase="tuning">TUNING</span>
+                                <span class="wxsat-phase-arrow">&#x25B8;</span>
+                                <span class="wxsat-phase-step" data-phase="listening">LISTENING</span>
+                                <span class="wxsat-phase-arrow">&#x25B8;</span>
+                                <span class="wxsat-phase-step" data-phase="signal_detected">SIGNAL</span>
+                                <span class="wxsat-phase-arrow">&#x25B8;</span>
+                                <span class="wxsat-phase-step" data-phase="decoding">DECODING</span>
+                                <span class="wxsat-phase-arrow">&#x25B8;</span>
+                                <span class="wxsat-phase-step" data-phase="complete">COMPLETE</span>
+                            </div>
+                        </div>
+                        <div class="wxsat-console-filters" id="wxsatConsoleFilters">
+                            <button class="wxsat-console-filter active" data-filter="all" onclick="WeatherSat.filterConsole('all')">ALL</button>
+                            <button class="wxsat-console-filter" data-filter="signal" onclick="WeatherSat.filterConsole('signal')">SIGNAL</button>
+                            <button class="wxsat-console-filter" data-filter="progress" onclick="WeatherSat.filterConsole('progress')">PROG</button>
+                            <button class="wxsat-console-filter" data-filter="error" onclick="WeatherSat.filterConsole('error')">ERR</button>
+                        </div>
+                        <div class="wxsat-console-actions">
+                            <button class="wxsat-strip-btn" onclick="WeatherSat.exportConsole()" title="Copy log to clipboard">COPY</button>
+                            <button class="wxsat-strip-btn" onclick="WeatherSat.clearConsole()" title="Clear console">CLR</button>
+                            <button class="wxsat-strip-btn" id="wxsatConsoleToggle"
+                                    onclick="WeatherSat.toggleConsole()" title="Toggle console">&#x25BC;</button>
+                        </div>
+                    </div>
+                    <div class="wxsat-console-body" id="wxsatConsoleBody">
+                        <div class="wxsat-console-log" id="wxsatConsoleLog">
+                            <div class="wxsat-console-entry wxsat-log-info">Waiting for capture...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Main content: 3-column layout -->
+                <div class="wxsat-content">
+                    <!-- Left: Pass predictions -->
+                    <div class="wxsat-passes-panel">
+                        <div class="wxsat-passes-header">
+                            <span class="wxsat-passes-title">Upcoming Passes</span>
+                            <span class="wxsat-passes-count" id="wxsatPassesCount">0</span>
+                            <button class="wxsat-strip-btn" onclick="WeatherSat.loadPasses()" title="Refresh pass predictions" style="margin-left: auto; font-size: 9px; padding: 2px 6px;">REFRESH</button>
+                        </div>
+                        <!-- Pass geometry detail (shown when pass selected) -->
+                        <div class="wxsat-pass-geometry" id="wxsatPassGeometry" style="display: none;">
+                            <div class="wxsat-geom-event">
+                                <span class="wxsat-geom-label">AOS</span>
+                                <span class="wxsat-geom-time" id="wxsatGeomAosTime">--</span>
+                                <span class="wxsat-geom-az" id="wxsatGeomAosAz">--</span>
+                            </div>
+                            <div class="wxsat-geom-arrow">&rarr;</div>
+                            <div class="wxsat-geom-event wxsat-geom-tca">
+                                <span class="wxsat-geom-label">TCA</span>
+                                <span class="wxsat-geom-time" id="wxsatGeomTcaEl">--</span>
+                                <span class="wxsat-geom-az" id="wxsatGeomTcaAz">--</span>
+                            </div>
+                            <div class="wxsat-geom-arrow">&rarr;</div>
+                            <div class="wxsat-geom-event">
+                                <span class="wxsat-geom-label">LOS</span>
+                                <span class="wxsat-geom-time" id="wxsatGeomLosTime">--</span>
+                                <span class="wxsat-geom-az" id="wxsatGeomLosAz">--</span>
+                            </div>
+                            <div class="wxsat-geom-meta" id="wxsatGeomMeta">--</div>
+                        </div>
+                        <div class="wxsat-passes-list" id="wxsatPassesList">
+                            <div class="wxsat-gallery-empty">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="width: 32px; height: 32px; margin-bottom: 8px; opacity: 0.3;">
+                                    <circle cx="12" cy="12" r="10"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>
+                                </svg>
+                                <p style="font-size: 12px; font-weight: 600; color: var(--text-secondary);">Set your location</p>
+                                <p style="font-size: 11px; margin-top: 4px;">Enter lat/lon in the strip bar above or click the GPS button to load pass predictions</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Center: Polar plot + Ground track map -->
+                    <div class="wxsat-center-panel">
+                        <div class="wxsat-polar-container">
+                            <div class="wxsat-panel-header">
+                                <span class="wxsat-panel-title">Polar Plot</span>
+                                <span class="wxsat-panel-subtitle" id="wxsatPolarSat">--</span>
+                            </div>
+                            <canvas id="wxsatPolarCanvas" width="300" height="300"></canvas>
+                        </div>
+                        <div class="wxsat-map-container">
+                            <div class="wxsat-panel-header">
+                                <span class="wxsat-panel-title">Global Projection</span>
+                                <span class="wxsat-panel-subtitle" id="wxsatMapInfo">--</span>
+                            </div>
+                            <div id="wxsatGroundMap" class="wxsat-ground-map"></div>
+                        </div>
+                    </div>
+
+                    <!-- Right: Image gallery -->
+                    <div class="wxsat-gallery-panel">
+                        <div class="wxsat-gallery-header">
+                            <span class="wxsat-gallery-title">Decoded Images</span>
+                            <span class="wxsat-gallery-count" id="wxsatImageCount">0</span>
+                            <button class="wxsat-gallery-clear-btn" onclick="WeatherSat.deleteAllImages()" title="Delete all images">
+                                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <div class="wxsat-gallery-grid" id="wxsatGallery">
+                            <div class="wxsat-gallery-empty">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                    <circle cx="12" cy="12" r="10"/>
+                                    <path d="M2 12h20"/>
+                                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+                                </svg>
+                                <p>No images decoded yet</p>
+                                <p style="margin-top: 4px; font-size: 11px;">Select a satellite pass and start capturing</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="wxsat-dash-sidebar">
+            {% include 'partials/modes/weather-satellite.html' %}
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}"></script>
+    <script src="{{ url_for('static', filename='js/map-utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/modes/weather-satellite.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            WeatherSat.init();
+            setTimeout(() => {
+                WeatherSat.invalidateMap();
+            }, 100);
+        });
+    </script>
+</body>
+</html>

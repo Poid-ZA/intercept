@@ -464,6 +464,19 @@ _gps_lock = threading.Lock()
 # never overrides a real gpsd fix.
 _external_position: GPSPosition | None = None
 _external_lock = threading.Lock()
+_external_callbacks: list[Callable[[GPSPosition], None]] = []
+
+
+def add_external_position_callback(callback: Callable[[GPSPosition], None]) -> None:
+    """Add a callback fired whenever a non-gpsd position is registered."""
+    if callback not in _external_callbacks:
+        _external_callbacks.append(callback)
+
+
+def remove_external_position_callback(callback: Callable[[GPSPosition], None]) -> None:
+    """Remove a non-gpsd position callback."""
+    if callback in _external_callbacks:
+        _external_callbacks.remove(callback)
 
 
 def set_external_position(position: GPSPosition) -> None:
@@ -471,6 +484,11 @@ def set_external_position(position: GPSPosition) -> None:
     global _external_position
     with _external_lock:
         _external_position = position
+    for callback in list(_external_callbacks):
+        try:
+            callback(position)
+        except Exception as e:
+            logger.error(f"External GPS position callback error: {e}")
 
 
 def get_external_position() -> GPSPosition | None:
@@ -483,6 +501,29 @@ def get_gps_reader() -> GPSDClient | None:
     """Get the global GPS client instance."""
     with _gps_lock:
         return _gps_client
+
+
+# User-selectable position source. "auto" (default) prefers a real gpsd fix
+# and falls back to an external (e.g. Meshtastic) one; "gpsd" and
+# "meshtastic" force that source only, ignoring the other even if available.
+VALID_SOURCE_PREFERENCES = ("auto", "gpsd", "meshtastic")
+_source_preference = "auto"
+_source_preference_lock = threading.Lock()
+
+
+def get_source_preference() -> str:
+    """Get the user-selected GPS source preference."""
+    with _source_preference_lock:
+        return _source_preference
+
+
+def set_source_preference(source: str) -> None:
+    """Set the user-selected GPS source preference."""
+    global _source_preference
+    if source not in VALID_SOURCE_PREFERENCES:
+        raise ValueError(f"Invalid GPS source preference: {source}")
+    with _source_preference_lock:
+        _source_preference = source
 
 
 def start_gpsd(
@@ -532,8 +573,21 @@ def stop_gps() -> None:
 
 
 def get_current_position() -> GPSPosition | None:
-    """Get the current GPS position from the global client, falling back to
-    an externally-registered position (e.g. Meshtastic) when gpsd has none."""
+    """Get the current GPS position, honoring the user's source preference.
+
+    "auto" prefers a real gpsd fix, falling back to an externally-registered
+    position (e.g. Meshtastic) when gpsd has none. "gpsd"/"meshtastic" force
+    that source only.
+    """
+    pref = get_source_preference()
+
+    if pref == "gpsd":
+        client = get_gps_reader()
+        return client.position if client else None
+
+    if pref == "meshtastic":
+        return get_external_position()
+
     client = get_gps_reader()
     if client and client.position:
         return client.position

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ISS SSTV // INTERCEPT</title>
+    <script>(function(){var t=localStorage.getItem('intercept-ui-tier')||'enhanced';document.documentElement.setAttribute('data-ui-tier',t);})();</script>
+    <!-- Dedicated dashboards always use bundled assets so navigation is not
+         blocked by external CDN reachability (see ais_dashboard.html). -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/fonts-local.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/variables.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/map-utils.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/modes/sstv.css') }}">
+    <script defer src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+    <style>
+        html, body { height: 100%; margin: 0; }
+        body.sstv-dash { display: flex; flex-direction: column; height: 100vh; }
+        .sstv-dash-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 16px; border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary); flex: 0 0 auto;
+        }
+        .sstv-dash-logo { font-family: var(--font-mono); font-weight: 700; letter-spacing: 0.05em; color: var(--text-primary); }
+        .sstv-dash-logo span { color: var(--text-dim); font-weight: 400; }
+        .sstv-dash-body { flex: 1; min-height: 0; overflow-y: auto; }
+        /* The visuals block is normally shown/hidden by the SPA's switchMode();
+           this page is single-mode, so force it on. */
+        #sstvVisuals { display: flex !important; }
+    </style>
+</head>
+<body class="sstv-dash" data-mode="sstv">
+    <div class="sstv-dash-header">
+        <div class="sstv-dash-logo">ISS SSTV <span>// INTERCEPT</span></div>
+        {% if not embedded %}
+        <a href="/?mode=sstv" class="nav-dashboard-btn" style="text-decoration:none;" title="Return to Main Dashboard">Main Dashboard</a>
+        {% endif %}
+    </div>
+
+    <div class="sstv-dash-body">
+        <div id="sstvVisuals" class="sstv-visuals-container" style="display: none;">
+            <!-- Status Strip -->
+            <div class="sstv-stats-strip">
+                <div class="sstv-strip-group">
+                    <div class="sstv-strip-status">
+                        <span class="sstv-strip-dot idle" id="sstvStripDot"></span>
+                        <span class="sstv-strip-status-text" id="sstvStripStatus">Idle</span>
+                    </div>
+                    <button class="sstv-strip-btn start" id="sstvStartBtn" onclick="SSTV.start()">Start</button>
+                    <button class="sstv-strip-btn stop" id="sstvStopBtn" onclick="SSTV.stop()" style="display: none;">Stop</button>
+                </div>
+                <div class="sstv-strip-divider"></div>
+                <div class="sstv-strip-group">
+                    <div class="sstv-strip-stat">
+                        <span class="sstv-strip-value accent-cyan">145.800</span>
+                        <span class="sstv-strip-label">MHZ</span>
+                    </div>
+                    <div class="sstv-strip-stat">
+                        <span class="sstv-strip-value" id="sstvStripImageCount">0</span>
+                        <span class="sstv-strip-label">IMAGES</span>
+                    </div>
+                </div>
+                <div class="sstv-strip-divider"></div>
+                <!-- Location Controls -->
+                <div class="sstv-strip-group">
+                    <div class="sstv-strip-location">
+                        <span class="sstv-strip-label" style="margin-right: 6px;">LOC</span>
+                        <input type="number" id="sstvObsLat" class="sstv-loc-input" step="0.0001" placeholder="Lat" title="Latitude">
+                        <input type="number" id="sstvObsLon" class="sstv-loc-input" step="0.0001" placeholder="Lon" title="Longitude">
+                        <button class="sstv-strip-btn gps" onclick="SSTV.useGPS(this)" title="Use GPS location">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;">
+                                <circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>
+                                <line x1="12" y1="2" x2="12" y2="6"/><line x1="12" y1="18" x2="12" y2="22"/>
+                                <line x1="2" y1="12" x2="6" y2="12"/><line x1="18" y1="12" x2="22" y2="12"/>
+                            </svg>
+                            GPS
+                        </button>
+                    </div>
+                </div>
+                <div class="sstv-strip-divider"></div>
+                <!-- TLE Update -->
+                <div class="sstv-strip-group">
+                    <button class="sstv-strip-btn update-tle" onclick="SSTV.updateTLE(this)" title="Update satellite orbital data from CelesTrak">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 12px; height: 12px;">
+                            <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+                            <path d="M3 3v5h5"/><path d="M3 12a9 9 0 0 0 9 9 9.75 9.75 0 0 0 6.74-2.74L21 16"/>
+                            <path d="M16 21h5v-5"/>
+                        </svg>
+                        Update TLE
+                    </button>
+                </div>
+            </div>
+
+            <!-- ISS Tracking Map + Countdown Row -->
+            <div class="sstv-top-row">
+                <!-- ISS Map -->
+                <div class="sstv-map-row">
+                    <div class="sstv-map-container">
+                        <div id="sstvIssMap" class="sstv-iss-map"></div>
+                        <div class="sstv-map-overlay">
+                            <div class="sstv-map-info">
+                                <span class="sstv-map-label">ISS</span>
+                                <span class="sstv-map-coords"><span id="sstvIssLat">--.-</span>°, <span id="sstvIssLon">--.-</span>°</span>
+                                <span class="sstv-map-alt">Alt: <span id="sstvIssAlt">---</span> km</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Next Pass Countdown Panel -->
+                <div class="sstv-countdown-panel">
+                    <div class="sstv-countdown-header">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 16px; height: 16px;">
+                            <circle cx="12" cy="12" r="10"/>
+                            <polyline points="12 6 12 12 16 14"/>
+                        </svg>
+                        <span>Next Pass</span>
+                    </div>
+                    <div class="sstv-countdown-body">
+                        <div class="sstv-countdown-timer" id="sstvCountdownTimer">
+                            <span class="sstv-countdown-value" id="sstvCountdownValue">--:--:--</span>
+                            <span class="sstv-countdown-label" id="sstvCountdownLabel">Set location</span>
+                        </div>
+                        <div class="sstv-countdown-details">
+                            <div class="sstv-countdown-detail">
+                                <span class="sstv-detail-label">Start</span>
+                                <span class="sstv-detail-value" id="sstvPassStart">--:--</span>
+                            </div>
+                            <div class="sstv-countdown-detail">
+                                <span class="sstv-detail-label">Max El</span>
+                                <span class="sstv-detail-value" id="sstvPassMaxEl">--°</span>
+                            </div>
+                            <div class="sstv-countdown-detail">
+                                <span class="sstv-detail-label">Duration</span>
+                                <span class="sstv-detail-value" id="sstvPassDuration">-- min</span>
+                            </div>
+                            <div class="sstv-countdown-detail">
+                                <span class="sstv-detail-label">Direction</span>
+                                <span class="sstv-detail-value" id="sstvPassDirection">--</span>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="sstv-countdown-status" id="sstvCountdownStatus">
+                        <span class="sstv-status-dot"></span>
+                        <span>Waiting for pass data...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Signal Scope -->
+            <div id="sstvScopePanel" style="display: none; margin-bottom: 12px;">
+                <div style="background: #0a0a0a; border: 1px solid #1e1a2e; border-radius: 6px; padding: 8px 10px; font-family: 'Roboto Condensed', 'Arial Narrow', sans-serif;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; font-size: 10px; color: #555; text-transform: uppercase; letter-spacing: 1px;">
+                        <span>Audio Waveform</span>
+                        <div style="display: flex; gap: 14px;">
+                            <span>RMS: <span id="sstvScopeRmsLabel" style="color: #c080ff; font-variant-numeric: tabular-nums;">0</span></span>
+                            <span>PEAK: <span id="sstvScopePeakLabel" style="color: #f44; font-variant-numeric: tabular-nums;">0</span></span>
+                            <span id="sstvScopeToneLabel" style="color: #444;">QUIET</span>
+                            <span id="sstvScopeStatusLabel" style="color: #444;">IDLE</span>
+                        </div>
+                    </div>
+                    <canvas id="sstvScopeCanvas" style="width: 100%; height: 80px; display: block; border-radius: 3px; background: #050510;"></canvas>
+                </div>
+            </div>
+
+            <!-- Main Row (Live + Gallery) -->
+            <div class="sstv-main-row">
+                <!-- Live Decode Section -->
+                <div class="sstv-live-section">
+                    <div class="sstv-live-header">
+                        <div class="sstv-live-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="12" cy="12" r="3"/>
+                            </svg>
+                            Live Decode
+                        </div>
+                    </div>
+                    <div class="sstv-live-content" id="sstvLiveContent">
+                        <div class="sstv-idle-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="12" cy="12" r="3"/>
+                                <path d="M3 9h2M19 9h2M3 15h2M19 15h2"/>
+                            </svg>
+                            <h4>ISS SSTV Decoder</h4>
+                            <p>Click Start to listen for SSTV transmissions on 145.800 MHz</p>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Gallery Section -->
+                <div class="sstv-gallery-section">
+                    <div class="sstv-gallery-header">
+                        <div class="sstv-gallery-title">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="width: 18px; height: 18px;">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                            Decoded Images
+                        </div>
+                        <div style="display:flex;align-items:center;gap:4px;">
+                            <span class="sstv-gallery-count" id="sstvImageCount">0</span>
+                            <button class="sstv-gallery-clear-btn" onclick="SSTV.deleteAllImages()" title="Delete all images">Clear All</button>
+                        </div>
+                    </div>
+                    <div class="sstv-gallery-grid" id="sstvGallery">
+                        <div class="sstv-gallery-empty">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="3" y="3" width="18" height="18" rx="2"/>
+                                <circle cx="8.5" cy="8.5" r="1.5"/>
+                                <polyline points="21 15 16 10 5 21"/>
+                            </svg>
+                            <p>No images decoded yet</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}"></script>
+    <script src="{{ url_for('static', filename='js/map-utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/modes/sstv.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            SSTV.init();
+            setTimeout(() => {
+                if (typeof SSTV !== 'undefined' && SSTV.invalidateMap) SSTV.invalidateMap();
+            }, 120);
+        });
+    </script>
+</body>
+</html>

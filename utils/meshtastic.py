@@ -825,6 +825,40 @@ class MeshtasticClient:
             return "^all"
         return f"!{node_num:08x}"
 
+    def _publish_local_position(self, position: dict, user_id: str) -> None:
+        """Register the local node's nodeDB position as an external GPS fix."""
+        if not position:
+            return
+        lat = position.get("latitude")
+        lon = position.get("longitude")
+        if lat is None or lon is None:
+            return
+        try:
+            from utils.gps import GPSPosition, set_external_position
+
+            # `time` is the device's own epoch stamp for the fix; without it
+            # the fix is treated as current.
+            fix_time = position.get("time")
+            timestamp = (
+                datetime.fromtimestamp(fix_time, tz=timezone.utc)
+                if isinstance(fix_time, (int, float)) and fix_time > 0
+                else datetime.now(timezone.utc)
+            )
+            set_external_position(
+                GPSPosition(
+                    latitude=lat,
+                    longitude=lon,
+                    altitude=position.get("altitude"),
+                    satellites=position.get("satsInView"),
+                    fix_quality=3,
+                    timestamp=timestamp,
+                    device=f"meshtastic:{user_id}",
+                )
+            )
+        except Exception:
+            # GPS forwarding failures should never break node-info reads
+            pass
+
     def get_node_info(self) -> NodeInfo | None:
         """Get local node information."""
         if not self._interface:
@@ -833,6 +867,12 @@ class MeshtasticClient:
             node = self._interface.getMyNodeInfo()
             user = node.get("user", {})
             position = node.get("position", {})
+
+            # The local node's own position usually never arrives as a
+            # POSITION_APP packet over the local link, so the device's nodeDB
+            # is the only place it shows up. Forward it to the GPS chain here
+            # so the observer location follows the node's onboard GPS.
+            self._publish_local_position(position, user.get("id", ""))
 
             return NodeInfo(
                 num=node.get("num", 0),

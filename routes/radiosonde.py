@@ -200,6 +200,23 @@ def _resolve_auto_rx_python(auto_rx_path: str) -> tuple[str | None, str, list[st
     return None, last_error, checked
 
 
+def _fallback_station_location() -> tuple[float, float]:
+    """Station coordinates to use when the client sends none.
+
+    Resolves through the shared observer chain (live GPS — gpsd or a Meshtastic
+    node's onboard GPS — then the configured location); 0.0/0.0 if unresolved.
+    """
+    try:
+        from routes.system import _get_observer_location
+
+        loc = _get_observer_location()
+        if loc.get("lat") is not None and loc.get("lon") is not None:
+            return float(loc["lat"]), float(loc["lon"])
+    except Exception:
+        pass
+    return 0.0, 0.0
+
+
 def generate_station_cfg(
     freq_min: float = 400.0,
     freq_max: float = 406.0,
@@ -604,16 +621,15 @@ def start_radiosonde():
 
     bias_t = data.get("bias_t", False)
 
-    # Validate optional location
-    latitude = 0.0
-    longitude = 0.0
+    # Validate optional location. When the client sends none, fall back to the
+    # shared observer location (live GPS — gpsd or Meshtastic — then config).
+    latitude, longitude = _fallback_station_location()
     if data.get("latitude") is not None and data.get("longitude") is not None:
         try:
             latitude = validate_latitude(data["latitude"])
             longitude = validate_longitude(data["longitude"])
         except ValueError:
-            latitude = 0.0
-            longitude = 0.0
+            latitude, longitude = _fallback_station_location()
 
     # Check if gpsd is available for live position updates
     gpsd_enabled = is_gpsd_running()

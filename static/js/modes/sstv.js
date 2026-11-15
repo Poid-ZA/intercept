@@ -22,6 +22,7 @@ const SSTV = (function() {
     let nextPassData = null;
     let pendingMapInvalidate = false;
     let locationListenersAttached = false;
+    let observerListenerAttached = false;
 
     // ISS frequency
     const ISS_FREQ = 145.800;
@@ -67,6 +68,17 @@ const SSTV = (function() {
         // Ensure Leaflet recomputes dimensions after the SSTV pane becomes visible.
         setTimeout(() => invalidateMap(), 80);
         setTimeout(() => invalidateMap(), 260);
+
+        // Follow a moving station: a live GPS fix (Meshtastic/gpsd) re-seeds the
+        // inputs and re-runs the observer-dependent pass predictions.
+        if (!observerListenerAttached) {
+            observerListenerAttached = true;
+            window.addEventListener('observer-location-changed', () => {
+                loadLocationInputs();
+                loadIssSchedule();
+                updateIssPosition();
+            });
+        }
     }
 
     function isMapContainerVisible() {
@@ -80,6 +92,21 @@ const SSTV = (function() {
             if (style.display === 'none' || style.visibility === 'hidden') return false;
         }
         return true;
+    }
+
+    /**
+     * Resolve the observer location: a live GPS fix (Meshtastic node or gpsd,
+     * resolved by ObserverLocation) wins over stored/configured coordinates.
+     */
+    function resolveObserver() {
+        if (window.ObserverLocation && ObserverLocation.getShared) {
+            const shared = ObserverLocation.getShared();
+            if (shared) return shared;
+        }
+        const lat = parseFloat(localStorage.getItem('observerLat'));
+        const lon = parseFloat(localStorage.getItem('observerLon'));
+        if (!isNaN(lat) && !isNaN(lon)) return { lat, lon };
+        return { lat: 51.5074, lon: -0.1278 };
     }
 
     /**
@@ -330,44 +357,23 @@ const SSTV = (function() {
         const mapContainer = document.getElementById('sstvIssMap');
         if (!mapContainer || issMap) return;
 
-        // Create map
-        issMap = L.map('sstvIssMap', {
+        if (typeof MapUtils === 'undefined') return;
+
+        // MapUtils.init() paints a zero-network canvas grid immediately, then
+        // upgrades to the configured tile provider async — no eager fetch to
+        // an external CDN on mode load.
+        issMap = MapUtils.init('sstvIssMap', {
             center: [0, 0],
             zoom: 1,
             minZoom: 1,
             maxZoom: 6,
-            zoomControl: true,
             attributionControl: false,
-            worldCopyJump: true
+            worldCopyJump: true,
         });
+        if (!issMap) return;
         window.issMap = issMap;
 
-        // Add fallback tiles immediately so the map is visible instantly. If Settings
-        // already loaded elsewhere this session, use it directly instead — avoids a
-        // flash of the unkeyed CartoDB URL when a CARTO API key has been configured.
-        const fallbackTiles = (typeof Settings !== 'undefined' && Settings._initialized && Settings.createTileLayer)
-            ? Settings.createTileLayer().addTo(issMap)
-            : L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-                maxZoom: 19,
-                className: 'tile-layer-cyan'
-            }).addTo(issMap);
-
-        // Upgrade tiles in background via Settings (with timeout fallback)
-        if (typeof Settings !== 'undefined') {
-            try {
-                await Promise.race([
-                    Settings.init(),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('Settings timeout')), 5000))
-                ]);
-                issMap.removeLayer(fallbackTiles);
-                Settings.createTileLayer().addTo(issMap);
-                Settings.registerMap(issMap);
-            } catch (e) {
-                console.warn('SSTV: Settings init failed/timed out, using fallback tiles:', e);
-            }
-        }
-
-        if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(issMap);
+        MapUtils.addGraticuleControl(issMap);
 
         // Create ISS icon
         const issIcon = L.divIcon({
@@ -621,8 +627,9 @@ const SSTV = (function() {
      * Fetch current ISS position
      */
     async function updateIssPosition() {
-        const storedLat = localStorage.getItem('observerLat') || '51.5074';
-        const storedLon = localStorage.getItem('observerLon') || '-0.1278';
+        const observer = resolveObserver();
+        const storedLat = observer.lat;
+        const storedLon = observer.lon;
 
         try {
             const url = `/sstv/iss-position?latitude=${storedLat}&longitude=${storedLon}`;
@@ -1272,14 +1279,10 @@ const SSTV = (function() {
      * Load ISS pass schedule
      */
     async function loadIssSchedule() {
-        // Try to get user's location from settings
-        const storedLat = localStorage.getItem('observerLat');
-        const storedLon = localStorage.getItem('observerLon');
-
-        // Check if location is actually set
-        const hasLocation = storedLat !== null && storedLon !== null;
-        const lat = storedLat || 51.5074;
-        const lon = storedLon || -0.1278;
+        // Observer location: live GPS fix (Meshtastic/gpsd) first, then stored/configured
+        const observer = resolveObserver();
+        const lat = observer.lat;
+        const lon = observer.lon;
 
         try {
             const response = await fetch(`/sstv/iss-schedule?latitude=${lat}&longitude=${lon}&hours=48`);

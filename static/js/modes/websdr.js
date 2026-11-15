@@ -393,49 +393,25 @@ function initWebsdrGlobe(mapEl) {
 }
 
 async function initWebsdrLeaflet(mapEl) {
-    if (typeof L === 'undefined') return false;
+    if (typeof MapUtils === 'undefined') return false;
 
     mapEl.innerHTML = '';
     const mapHeight = mapEl.clientHeight || 500;
     const minZoom = Math.ceil(Math.log2(mapHeight / 256));
 
-    websdrMap = L.map('websdrMap', {
+    // MapUtils.init() paints a zero-network canvas grid immediately, then
+    // upgrades to the configured tile provider async — no eager fetch to
+    // an external CDN on mode load.
+    websdrMap = MapUtils.init('websdrMap', {
         center: [20, 0],
         zoom: Math.max(minZoom, 2),
         minZoom: Math.max(minZoom, 2),
-        zoomControl: true,
         maxBounds: [[-85, -360], [85, 360]],
         maxBoundsViscosity: 1.0,
     });
+    if (!websdrMap) return false;
 
-    // Add fallback tiles immediately so the map is visible instantly. If Settings
-    // already loaded elsewhere this session, use it directly instead — avoids a
-    // flash of the unkeyed CartoDB URL when a CARTO API key has been configured.
-    const fallbackTiles = (typeof Settings !== 'undefined' && Settings._initialized && Settings.createTileLayer)
-        ? Settings.createTileLayer().addTo(websdrMap)
-        : L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-            attribution: '&copy; OpenStreetMap contributors &copy; CARTO',
-            subdomains: 'abcd',
-            maxZoom: 19,
-            className: 'tile-layer-cyan',
-        }).addTo(websdrMap);
-
-    // Upgrade tiles in background via Settings (with timeout fallback)
-    if (typeof Settings !== 'undefined' && Settings.createTileLayer) {
-        try {
-            await Promise.race([
-                Settings.init(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('Settings timeout')), 5000))
-            ]);
-            websdrMap.removeLayer(fallbackTiles);
-            Settings.createTileLayer().addTo(websdrMap);
-            Settings.registerMap(websdrMap);
-        } catch (e) {
-            console.warn('WebSDR: Settings init failed/timed out, using fallback tiles:', e);
-        }
-    }
-
-    if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(websdrMap);
+    MapUtils.addGraticuleControl(websdrMap);
     mapEl.style.background = '#1a1d29';
     return true;
 }

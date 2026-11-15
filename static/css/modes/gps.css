@@ -64,6 +64,36 @@
     box-shadow: 0 0 6px rgba(255, 68, 68, 0.4);
 }
 
+.gps-source-toggle-group {
+    display: flex;
+    gap: 4px;
+}
+
+.gps-source-btn {
+    flex: 1;
+    font-size: 10px;
+    padding: 4px 6px;
+    background: var(--bg-primary);
+    border: 1px solid var(--border-color);
+    border-radius: 3px;
+    color: var(--text-dim);
+    cursor: pointer;
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.gps-source-btn:hover {
+    color: var(--text-secondary);
+    border-color: var(--text-dim);
+}
+
+.gps-source-btn.active {
+    color: var(--bg-primary);
+    background: var(--accent-cyan);
+    border-color: var(--accent-cyan);
+}
+
 .gps-status-text {
     font-size: 11px;
     color: var(--text-secondary);

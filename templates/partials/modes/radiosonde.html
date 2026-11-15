@@ -296,6 +296,7 @@
     let radiosondeTrackPoints = new Map();
     let radiosondeStationLocation = { lat: 0, lon: 0 };
     let radiosondeStationMarker = null;
+    let radiosondeObserverListenerAttached = false;
 
     function initRadiosondeMap() {
         if (radiosondeMap) return;
@@ -369,6 +370,19 @@
                 }
             })
             .catch(() => {});
+
+        // Keep following the station when the live fix (Meshtastic/gpsd) moves.
+        if (!radiosondeObserverListenerAttached) {
+            radiosondeObserverListenerAttached = true;
+            window.addEventListener('observer-location-changed', function (e) {
+                const lat = Number(e.detail?.lat);
+                const lon = Number(e.detail?.lon);
+                if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+                radiosondeStationLocation = { lat, lon };
+                if (radiosondeStationMarker) radiosondeStationMarker.setLatLng([lat, lon]);
+                updateRadiosondeCards();
+            });
+        }
     }
 
     function updateRadiosondeMap(balloon) {

@@ -225,3 +225,10 @@ def traceroute():
         return api_error("node_id is required", 400)
     _client().request_traceroute(node_id)
     return jsonify({"status": "requested", "node_id": node_id})
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+

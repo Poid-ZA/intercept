@@ -48,6 +48,9 @@ sudo -E venv/bin/python intercept.py
 
 ### Testing
 ```bash
+# Run all tests under a memory ceiling (preferred — see note below)
+./run-tests.sh
+
 # Run all tests
 pytest
 
@@ -64,6 +67,30 @@ pytest tests/test_bluetooth.py::test_function_name -v
 # (needs: pip install playwright && python -m playwright install chromium)
 pytest tests/smoke -q
 ```
+
+**SSE fanout mock-queue leak (fixed 2026-08-14)**: `routes/bluetooth_v2.py`'s
+stream endpoint passes `scanner._event_queue` to `utils/sse.py`'s fanout, whose
+distributor thread loops on `src.get(timeout=...)`. `test_bluetooth_api.py`'s
+`mock_scanner` left that attribute a bare `MagicMock`, so `.get()` returned
+instantly instead of blocking and never raised `queue.Empty` — the daemon
+thread spun at full CPU, and `unittest.mock` appended a `_Call` to the mock's
+call history on every iteration (~110 MB/s, confirmed via `tracemalloc`:
+437k blocks at `utils/sse.py:61`). `_fanout_channels` is module-global and
+`_run_fanout` was `while True`, so the thread outlived its test and kept
+growing for the whole session — the suite reached ~28 GB and tripped the
+**global** OOM killer, taking unrelated host processes down with it. Growth was
+wall-clock-driven, not test-driven, which is why it looked like whichever test
+happened to idle longest (the `time.sleep(duration + 1)` in
+`get_tscm_bluetooth_snapshot`) was the leaker. The fixture now uses a real
+`queue.Queue` (the part that matters most). The `stop`-event teardown and
+autouse `conftest.py` reset from the original fix were dropped when this branch
+took upstream's `utils/sse.py` and `tests/conftest.py` during the 2.33.89 merge
+(upstream has no teardown). Peak for that file was 2510 MB → 319 MB with the
+full fix; re-check peak memory if the suite grows again. Prefer `./run-tests.sh`
+(cgroup `MemoryMax=8G`, `MemorySwapMax=0`) so a future runaway dies in its own
+cgroup instead of OOMing the host. Do **not** wrap runs in
+`git stash push … && pytest && git stash pop` — if the run is killed the pop
+never fires and the edits are left orphaned in a stash.
 
 ### Linting and Formatting
 ```bash
@@ -161,6 +188,60 @@ Each signal type has its own Flask blueprint:
 | AIS-catcher | AIS vessel tracking | JSON output parsing |
 | direwolf | APRS | TNC modem for packet radio |
 
+### Observer location (where "here" comes from)
+One chain answers "where is the receiver", used by every map and every
+observer-dependent calculation. In priority order:
+
+1. **Live GPS fix** — gpsd, or a Meshtastic node's onboard GPS. Meshtastic
+   positions reach it two ways: `POSITION_APP` packets from the local node
+   (`utils/meshtastic.py:_handle_*`), and the device's own nodeDB position read
+   on every `get_node_info()` call (`_publish_local_position()`) — the local
+   node usually never sends itself a `POSITION_APP` packet, so the nodeDB path
+   is what actually fires for a directly-connected node. Both call
+   `utils.gps.set_external_position()`. `utils/gps.py:get_current_position()`
+   arbitrates between gpsd and external per the `auto|gpsd|meshtastic`
+   preference (`/gps/source`).
+2. **Configured location** — `INTERCEPT_DEFAULT_LAT/LON`, written by
+   `/settings/observer-location`.
+3. **Constant** — London, `utils/constants.py`.
+
+`routes/system.py:_get_observer_location()` implements it and serves
+`/system/location` (`source: gps|config|default`, plus `gps_source:
+meshtastic|gpsd` when live). Fixes older than 15 minutes are treated as stale
+and skipped, so an unplugged node doesn't pin every map to a ghost position.
+
+Frontend: every consumer must both *resolve* through `ObserverLocation` and
+*re-follow* the fix. Reading it once at page/mode init is not enough on a
+mobile station: `observer-location.js` fires `observer-location-changed`
+whenever the live fix moves, and the ADS-B / AIS / satellite dashboards, the
+SPA (distance calcs + satellite inputs + ground-track reticle), the APRS
+dashboard, SSTV and radiosonde all listen for it and re-centre/recompute
+(2026-08-14). SSTV and the APRS dashboard previously bypassed the chain
+entirely — SSTV read `localStorage.observerLat/Lon`, the APRS dashboard read
+`window.INTERCEPT_DEFAULT_LAT/LON` — both now go through
+`ObserverLocation.getShared()` (their `resolveObserver()` helpers).
+`static/js/core/app.js` has a stale copy of the same observer bootstrap but is
+not included by any template — dead file, left in place.
+
+`static/js/core/observer-location.js` polls `/system/location` every
+20 s and a live fix **overrides** stored/manual coordinates —
+`ObserverLocation.getShared()`/`getForModule()` return it, and every consumer
+(ADS-B/AIS/satellite dashboards, weather-sat, SSTV, radiosonde, BT-Locate, the
+SPA) follows automatically. It fires the existing `observer-location-changed`
+event when the fix moves. Server-side defaults resolve through the same chain
+(`routes/satellite.py:_default_observer()`,
+`routes/radiosonde.py:_fallback_station_location()`) rather than hardcoding
+London or 0/0. **Add new observer-dependent code through these helpers, never a
+literal coordinate.**
+
+On `adsb-pi` the same chain also drives dump1090-fa: `gps-location-sync.timer`
+rewrites `RECEIVER_LAT/LON` (and the ADS-B Exchange feeder's
+`LATITUDE`/`LONGITUDE`) when the fix moves >250 m so SkyAware/tar1090 and the
+upstream feed all track the mobile station — see
+`/opt/pi-provision/assets/gps-location-sync/`. The Pi's own homepage
+(`http://<pi>/`) reads `/system/location` through a lighttpd proxy to :5050
+rather than baking coordinates in at install time.
+
 ### Frontend Structure
 - **UI direction (decided 2026-06-12)**: map-heavy modes get dedicated dashboard
   pages; the SPA in `index.html` keeps text/scan modes. The migration is
@@ -177,6 +258,18 @@ Each signal type has its own Flask blueprint:
   `static/css/<mode>_dashboard.css`); ADS-B/AIS/satellite predate it and carry
   their own chrome. Mesh dashboards reuse the existing self-contained
   `static/js/modes/{meshtastic,meshcore}.js` modules unchanged.
+- **ADS-B history writer CPU-spin fix (2026-08-13)**: `AdsbHistoryWriter._run()`
+  and `AdsbSnapshotWriter._run()` (`utils/adsb_history.py`) computed
+  `timeout = max(0.0, FLUSH_INTERVAL - (time.time() - last_flush))`, but
+  `last_flush` only advances on a successful non-empty flush — once the queue
+  sat empty longer than `FLUSH_INTERVAL`, `timeout` locked at `0` forever and
+  `queue.get(timeout=0)` became a non-blocking busy-spin (confirmed via
+  `py-spy dump` pegging a CPU core at 100%, parked in gevent's
+  `Timeout.start()`). Fixed by blocking with no timeout when `batch` is empty
+  (nothing time-based to flush anyway) rather than computing a timeout that
+  degenerates to 0. Same bug/fix applied to the Pi's `/opt/intercept` copy —
+  see `/opt/pi-provision/CLAUDE.md`'s 2026-08-13 entry, which also has the
+  provisioning-overlay fix so a Pi reflash doesn't reintroduce it.
 - **Templates**: `templates/index.html` (main SPA), `templates/partials/modes/*.html` (sidebar panels), `templates/partials/nav.html` (global nav)
 - **JS Modules**: `static/js/modes/*.js` - IIFE pattern per mode (e.g., `WeatherSat`, `SSTV`, `Meshtastic`)
 - **CSS**: `static/css/modes/*.css` - scoped styles per mode, CSS variables for theming (`--bg-card`, `--accent-cyan`, `--font-mono`)

@@ -1414,6 +1414,21 @@
             return false;
         }
 
+        // A live GPS fix (Meshtastic node or gpsd) or a settings change moves the
+        // observer — re-seed the inputs, marker and pass predictions.
+        window.addEventListener('observer-location-changed', function (e) {
+            const lat = Number(e.detail?.lat);
+            const lon = Number(e.detail?.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            const latInput = document.getElementById('obsLat');
+            const lonInput = document.getElementById('obsLon');
+            if (latInput) latInput.value = lat.toFixed(4);
+            if (lonInput) lonInput.value = lon.toFixed(4);
+            updateObserverMarker(lat, lon);
+            updateMissionDrawerInfo();
+            calculatePasses();
+        });
+
         let satelliteSSE = null;
 
         function startSSETracking() {

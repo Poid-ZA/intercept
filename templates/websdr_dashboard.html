@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WEBSDR // INTERCEPT - WebSDR</title>
+    <script>(function(){var t=localStorage.getItem('intercept-ui-tier')||'enhanced';document.documentElement.setAttribute('data-ui-tier',t);})();</script>
+    <!-- Dedicated dashboards always use bundled assets so navigation is not
+         blocked by external CDN reachability (see ais_dashboard.html). -->
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/fonts-local.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/variables.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/core/map-utils.css') }}">
+    <script defer src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
+    <style>
+        html, body { height: 100%; margin: 0; }
+        body.wsdr-dash { display: flex; flex-direction: column; height: 100vh; }
+        .wsdr-dash-header {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 10px 16px; border-bottom: 1px solid var(--border-color);
+            background: var(--bg-secondary); flex: 0 0 auto;
+        }
+        .wsdr-dash-logo { font-family: var(--font-mono); font-weight: 700; letter-spacing: 0.05em; color: var(--text-primary); }
+        .wsdr-dash-logo span { color: var(--text-dim); font-weight: 400; }
+        .wsdr-dash-body { display: flex; flex: 1; min-height: 0; }
+        .wsdr-dash-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+        .wsdr-dash-sidebar { width: 300px; flex: 0 0 300px; overflow-y: auto; padding: 12px; border-left: 1px solid var(--border-color); background: var(--bg-secondary); }
+        /* The options partial and visuals block are normally shown/hidden by
+           the SPA's switchMode(); this page is single-mode, so force them on. */
+        #websdrMode { display: block; }
+        #websdrVisuals { display: flex !important; }
+        @media (max-width: 900px) {
+            .wsdr-dash-body { flex-direction: column; }
+            .wsdr-dash-sidebar { width: auto; flex: 0 0 auto; border-left: none; border-top: 1px solid var(--border-color); }
+        }
+    </style>
+</head>
+<body class="wsdr-dash" data-mode="websdr">
+    <div class="wsdr-dash-header">
+        <div class="wsdr-dash-logo">WEBSDR <span>// INTERCEPT - WebSDR</span></div>
+        {% if not embedded %}
+        <a href="/?mode=websdr" class="nav-dashboard-btn" style="text-decoration:none;" title="Return to Main Dashboard">Main Dashboard</a>
+        {% endif %}
+    </div>
+
+    <div class="wsdr-dash-body">
+        <div class="wsdr-dash-main">
+            <!-- WebSDR Dashboard -->
+            <div id="websdrVisuals" style="display: none; padding: 12px; flex-direction: column; gap: 12px; flex: 1; min-height: 0; overflow: hidden;">
+                <!-- Audio Control Bar (hidden until connected) -->
+                <div id="kiwiAudioControls" class="radio-module-box" style="display: none; padding: 8px 12px; flex-shrink: 0;">
+                    <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                        <!-- Live indicator -->
+                        <div style="display: flex; align-items: center; gap: 5px;">
+                            <div id="kiwiLiveIndicator" style="width: 8px; height: 8px; border-radius: 50%; background: var(--accent-green); animation: pulse 1.5s infinite;"></div>
+                            <span style="font-size: 10px; color: var(--text-muted); text-transform: uppercase;">LIVE</span>
+                        </div>
+                        <!-- Receiver name -->
+                        <span id="kiwiBarReceiverName" style="font-size: 11px; color: var(--accent-cyan); max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"></span>
+                        <!-- Frequency input -->
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <input type="number" id="kiwiBarFrequency" step="1" style="width: 80px; font-size: 12px; font-family: var(--font-mono); padding: 2px 6px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);">
+                            <span style="font-size: 10px; color: var(--text-muted);">kHz</span>
+                        </div>
+                        <!-- Mode selector -->
+                        <select id="kiwiBarMode" style="font-size: 11px; padding: 2px 6px; background: rgba(0,0,0,0.3); border: 1px solid var(--border-color); border-radius: 4px; color: var(--text-primary);">
+                            <option value="am">AM</option>
+                            <option value="usb">USB</option>
+                            <option value="lsb">LSB</option>
+                            <option value="cw">CW</option>
+                        </select>
+                        <!-- Tune button -->
+                        <button class="preset-btn" onclick="tuneFromBar()" style="font-size: 10px; padding: 3px 10px;">Tune</button>
+                        <!-- Volume -->
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <span style="font-size: 10px; color: var(--text-muted);">VOL</span>
+                            <input type="range" id="kiwiBarVolume" min="0" max="100" value="80" style="width: 60px;" oninput="setKiwiVolume(this.value)">
+                        </div>
+                        <!-- S-meter mini -->
+                        <div style="display: flex; align-items: center; gap: 4px;">
+                            <div style="width: 50px; height: 6px; background: rgba(0,0,0,0.5); border-radius: 3px; overflow: hidden;">
+                                <div id="kiwiBarSmeter" style="height: 100%; width: 0%; background: linear-gradient(to right, var(--accent-green), var(--accent-orange)); transition: width 0.2s; border-radius: 3px;"></div>
+                            </div>
+                            <span id="kiwiBarSmeterValue" style="font-size: 9px; color: var(--text-muted); font-family: var(--font-mono); min-width: 20px;">S0</span>
+                        </div>
+                        <!-- Disconnect -->
+                        <button class="stop-btn" onclick="disconnectFromReceiver()" style="font-size: 10px; padding: 3px 10px; margin-left: auto;">Disconnect</button>
+                    </div>
+                </div>
+                <!-- Map and receiver list side by side -->
+                <div style="display: grid; grid-template-columns: 3fr 1fr; gap: 12px; flex: 1; min-height: 0; overflow: hidden;">
+                    <!-- Map -->
+                    <div class="radio-module-box" style="padding: 0; overflow: hidden; position: relative; min-height: 0;">
+                        <div id="websdrMap" style="position: absolute; top: 0; left: 0; right: 0; bottom: 0; display: flex; align-items: center; justify-content: center; overflow: hidden;"></div>
+                    </div>
+                    <!-- Receiver List -->
+                    <div style="display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; overflow: hidden;">
+                        <div class="radio-module-box" style="padding: 10px; flex: 1; overflow-y: auto; min-height: 0;">
+                            <div class="module-header" style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; font-size: 10px;">
+                                <span>RECEIVERS</span>
+                                <span id="websdrReceiverCount" style="color: var(--accent-cyan);">0 found</span>
+                            </div>
+                            <div id="websdrReceiverList" style="font-size: 11px;">
+                                <div style="color: var(--text-muted); text-align: center; padding: 20px;">Click "Find Receivers" to search</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="wsdr-dash-sidebar">
+            {% include 'partials/modes/websdr.html' %}
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}"></script>
+    <script src="{{ url_for('static', filename='js/map-utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/modes/websdr.js') }}"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            if (typeof initWebSDR === 'function') initWebSDR();
+        });
+    </script>
+</body>
+</html>

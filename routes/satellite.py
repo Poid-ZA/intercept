@@ -540,6 +540,21 @@ def iss_dashboard():
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
     return response
+def _default_observer() -> tuple[float, float]:
+    """Observer coordinates to use when the client sends none.
+
+    Resolves through the shared chain (live GPS — gpsd or a Meshtastic node's
+    onboard GPS — then configured location, then the London constant).
+    """
+    try:
+        from routes.system import _get_observer_location
+
+        loc = _get_observer_location()
+        if loc.get("lat") is not None and loc.get("lon") is not None:
+            return float(loc["lat"]), float(loc["lon"])
+    except Exception:
+        pass
+    return 51.5074, -0.1278
 
 
 @satellite_bp.route("/predict", methods=["POST"])
@@ -556,8 +571,9 @@ def predict_passes():
 
     try:
         # Validate inputs
-        lat = validate_latitude(data.get("latitude", data.get("lat", 51.5074)))
-        lon = validate_longitude(data.get("longitude", data.get("lon", -0.1278)))
+        default_lat, default_lon = _default_observer()
+        lat = validate_latitude(data.get("latitude", data.get("lat", default_lat)))
+        lon = validate_longitude(data.get("longitude", data.get("lon", default_lon)))
         hours = validate_hours(data.get("hours", 24))
         min_el = validate_elevation(data.get("minEl", 10))
     except ValueError as e:
@@ -805,8 +821,9 @@ def get_satellite_position():
 
     # Validate inputs
     try:
-        lat = validate_latitude(data.get("latitude", data.get("lat", 51.5074)))
-        lon = validate_longitude(data.get("longitude", data.get("lon", -0.1278)))
+        default_lat, default_lon = _default_observer()
+        lat = validate_latitude(data.get("latitude", data.get("lat", default_lat)))
+        lon = validate_longitude(data.get("longitude", data.get("lon", default_lon)))
     except ValueError as e:
         return api_error(str(e), 400)
 

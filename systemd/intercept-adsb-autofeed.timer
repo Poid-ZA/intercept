@@ -1,0 +1,10 @@
+[Unit]
+Description=Periodically re-resolve adsb-pi and re-point INTERCEPT's ADS-B tracking
+
+[Timer]
+OnBootSec=45s
+OnUnitActiveSec=5min
+Unit=intercept-adsb-autofeed.service
+
+[Install]
+WantedBy=timers.target

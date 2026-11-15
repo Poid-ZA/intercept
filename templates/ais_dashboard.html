@@ -533,6 +533,24 @@
                 .catch(() => {});
         }
 
+        // A live GPS fix (Meshtastic node or gpsd) or a settings change moves the
+        // station — follow it instead of staying on the load-time coordinates.
+        window.addEventListener('observer-location-changed', function (e) {
+            const lat = Number(e.detail?.lat);
+            const lon = Number(e.detail?.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            observerLocation = { lat, lon };
+            const latInput = document.getElementById('obsLat');
+            const lonInput = document.getElementById('obsLon');
+            if (latInput) latInput.value = lat;
+            if (lonInput) lonInput.value = lon;
+            if (observerMarker) observerMarker.setLatLng([lat, lon]);
+            if (vesselMap) {
+                vesselMap.setView([lat, lon], vesselMap.getZoom());
+                drawRangeRings();
+            }
+        });
+
         function updateObserverLoc() {
             const lat = parseFloat(document.getElementById('obsLat').value);
             const lon = parseFloat(document.getElementById('obsLon').value);

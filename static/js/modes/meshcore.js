@@ -395,29 +395,15 @@ const MeshCore = (function () {
     function _initMap() {
         const container = document.getElementById('meshcoreMap');
         if (!container || _map) return;
-        _map = L.map('meshcoreMap', { zoomControl: true }).setView([20, 0], 2);
+        if (typeof MapUtils === 'undefined') return;
 
-        // If Settings already loaded elsewhere this session, use it directly instead —
-        // avoids a flash of the unkeyed CartoDB URL when a CARTO API key is configured.
-        const fallback = (typeof Settings !== 'undefined' && Settings._initialized && Settings.createTileLayer)
-            ? Settings.createTileLayer().addTo(_map)
-            : L.tileLayer('https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png', {
-                attribution: '© CartoDB',
-                maxZoom: 19,
-            }).addTo(_map);
+        // MapUtils.init() paints a zero-network canvas grid immediately, then
+        // upgrades to the configured tile provider async — no eager fetch to
+        // an external CDN on mode load.
+        _map = MapUtils.init('meshcoreMap', { center: [20, 0], zoom: 2 });
+        if (!_map) return;
 
-        if (typeof Settings !== 'undefined') {
-            Promise.race([
-                Settings.init(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 5000)),
-            ]).then(() => {
-                fallback.remove();
-                Settings.createTileLayer().addTo(_map);
-                Settings.registerMap(_map);
-            }).catch(e => console.warn('MeshCore: Settings init failed, using fallback tiles:', e));
-        }
-
-        if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(_map);
+        MapUtils.addGraticuleControl(_map);
     }
 
     function _updateMapMarker(node) {

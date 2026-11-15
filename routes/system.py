@@ -16,6 +16,7 @@ import socket
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -434,18 +435,40 @@ def _ensure_collector() -> None:
         logger.info("System metrics collector started")
 
 
+# A fix older than this is treated as stale: the receiver may have moved since,
+# so falling back to the configured location beats pinning maps to a ghost.
+_GPS_FIX_MAX_AGE_SECONDS = 900
+
+
+def _fix_is_fresh(pos: Any) -> bool:
+    """True when a position has no timestamp or its timestamp is recent."""
+    ts = getattr(pos, "timestamp", None)
+    if not isinstance(ts, datetime):
+        return True
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts).total_seconds() <= _GPS_FIX_MAX_AGE_SECONDS
+
+
 def _get_observer_location() -> dict[str, Any]:
     """Get observer location from GPS state or config defaults."""
     lat, lon, source = None, None, "none"
+    gps_source: str | None = None
     gps_meta: dict[str, Any] = {}
 
-    # Try GPS via utils.gps
+    # Try GPS via utils.gps — this covers both gpsd and a Meshtastic node's
+    # onboard GPS (registered as an external position by utils.meshtastic).
     with contextlib.suppress(Exception):
         from utils.gps import get_current_position
 
         pos = get_current_position()
-        if pos and pos.fix_quality >= 2:
+        if pos and pos.fix_quality >= 2 and _fix_is_fresh(pos):
             lat, lon, source = pos.latitude, pos.longitude, "gps"
+            device = pos.device if isinstance(pos.device, str) else ""
+            gps_source = "meshtastic" if device.startswith("meshtastic:") else "gpsd"
+            gps_meta["source"] = gps_source
+            if device:
+                gps_meta["device"] = device
             gps_meta["fix_quality"] = pos.fix_quality
             gps_meta["satellites"] = pos.satellites
             if pos.epx is not None and pos.epy is not None:
@@ -470,6 +493,8 @@ def _get_observer_location() -> dict[str, Any]:
             lat, lon, source = CONST_LAT, CONST_LON, "default"
 
     result: dict[str, Any] = {"lat": lat, "lon": lon, "source": source}
+    if gps_source:
+        result["gps_source"] = gps_source
     if gps_meta:
         result["gps"] = gps_meta
     return result

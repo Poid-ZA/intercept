@@ -246,7 +246,15 @@ class AdsbHistoryWriter:
         last_flush = time.time()
 
         while not self._stop_event.is_set():
-            timeout = max(0.0, ADSB_HISTORY_FLUSH_INTERVAL - (time.time() - last_flush))
+            # last_flush only advances on a successful non-empty flush, so
+            # while the queue sits empty this would otherwise clamp to 0 and
+            # spin queue.get(timeout=0) as fast as the CPU allows. With an
+            # empty batch there's nothing time-based to flush anyway, so
+            # block until an item actually arrives instead.
+            if batch:
+                timeout = max(0.0, ADSB_HISTORY_FLUSH_INTERVAL - (time.time() - last_flush))
+            else:
+                timeout = None
             try:
                 item = self._queue.get(timeout=timeout)
                 batch.append(item)
@@ -342,7 +350,15 @@ class AdsbSnapshotWriter:
         last_flush = time.time()
 
         while not self._stop_event.is_set():
-            timeout = max(0.0, ADSB_HISTORY_FLUSH_INTERVAL - (time.time() - last_flush))
+            # last_flush only advances on a successful non-empty flush, so
+            # while the queue sits empty this would otherwise clamp to 0 and
+            # spin queue.get(timeout=0) as fast as the CPU allows. With an
+            # empty batch there's nothing time-based to flush anyway, so
+            # block until an item actually arrives instead.
+            if batch:
+                timeout = max(0.0, ADSB_HISTORY_FLUSH_INTERVAL - (time.time() - last_flush))
+            else:
+                timeout = None
             try:
                 item = self._queue.get(timeout=timeout)
                 batch.append(item)

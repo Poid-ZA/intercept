@@ -88,3 +88,4 @@ docs/design/
 
 # Git worktrees
 .worktrees/
+adsb-autofeed.env

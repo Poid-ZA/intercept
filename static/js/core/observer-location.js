@@ -1,5 +1,8 @@
 // Shared observer location helper for map-based modules.
 // Default: shared location enabled unless explicitly disabled via config.
+// A live GPS fix (gpsd or a Meshtastic node's onboard GPS, resolved server-side
+// by /system/location) takes priority over a stored or configured location, so
+// every map follows the receiver when it moves.
 window.ObserverLocation = (function() {
     const SHARED_KEY = 'observerLocation';
     const AIS_KEY = 'ais_observerLocation';
@@ -47,7 +50,54 @@ window.ObserverLocation = (function() {
         return !!(readKey(SHARED_KEY) || readKey(AIS_KEY) || readLegacyLatLon());
     }
 
+    // ---- live GPS (gpsd / Meshtastic), resolved by /system/location ----
+    const LIVE_POLL_MS = 20000;
+    let livePosition = null;   // { lat, lon } or null
+    let liveSource = null;     // 'meshtastic' | 'gpsd' | null
+    let livePollStarted = false;
+
+    function getLive() {
+        return livePosition ? { ...livePosition } : null;
+    }
+
+    function getLiveSource() {
+        return liveSource;
+    }
+
+    function applyLive(data) {
+        const normalized = data && data.source === 'gps' ? normalize(data.lat, data.lon) : null;
+        const changed = !!normalized !== !!livePosition
+            || (normalized && livePosition
+                && (normalized.lat !== livePosition.lat || normalized.lon !== livePosition.lon));
+        livePosition = normalized;
+        liveSource = normalized ? (data.gps_source || 'gpsd') : null;
+        if (changed) {
+            window.dispatchEvent(new CustomEvent('observer-location-changed', {
+                detail: normalized
+                    ? { lat: normalized.lat, lon: normalized.lon, source: liveSource }
+                    : getShared()
+            }));
+        }
+    }
+
+    function refreshLive() {
+        return fetch('/system/location')
+            .then(r => (r.ok ? r.json() : null))
+            .then(data => { if (data) applyLive(data); })
+            .catch(() => {});
+    }
+
+    function startLivePolling() {
+        if (livePollStarted) return;
+        livePollStarted = true;
+        refreshLive();
+        setInterval(refreshLive, LIVE_POLL_MS);
+    }
+
     function getShared() {
+        const live = getLive();
+        if (live) return live;
+
         const current = readKey(SHARED_KEY);
         if (current) return current;
 
@@ -70,6 +120,9 @@ window.ObserverLocation = (function() {
     }
 
     function getForModule(moduleKey, options = {}) {
+        const live = getLive();
+        if (live) return live;
+
         if (isSharedEnabled()) {
             return getShared();
         }
@@ -99,6 +152,8 @@ window.ObserverLocation = (function() {
         }
     }
 
+    startLivePolling();
+
     return {
         isSharedEnabled,
         hasStoredLocation,
@@ -106,6 +161,9 @@ window.ObserverLocation = (function() {
         setShared,
         getForModule,
         setForModule,
+        getLive,
+        getLiveSource,
+        refreshLive,
         normalize,
         DEFAULT_LOCATION: { ...DEFAULT_LOCATION }
     };

@@ -11,7 +11,7 @@ import json
 import queue
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 from utils.logging import get_logger
 from utils.responses import api_error
@@ -779,3 +779,10 @@ def skip_pass(pass_id: str):
         return jsonify({"status": "skipped", "pass_id": pass_id})
     else:
         return api_error("Pass not found or already processed", 404)
+
+
+@weather_sat_bp.route("/dashboard")
+def weather_sat_dashboard():
+    """Popout Weather Satellite dashboard."""
+    embedded = request.args.get("embedded", "false") == "true"
+    return render_template("weather_sat_dashboard.html", embedded=embedded)

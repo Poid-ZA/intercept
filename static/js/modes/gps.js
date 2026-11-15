@@ -52,6 +52,10 @@ const GPS = (function() {
             }).catch(() => {});
         }
         drawEmptySkyView();
+        fetch('/gps/source')
+            .then(r => r.json())
+            .then(data => { if (data.source) updateSourceToggleUI(data.source); })
+            .catch(() => {});
         if (!connected) connect();
 
         // Redraw sky view when theme changes
@@ -614,7 +618,7 @@ const GPS = (function() {
             .then(data => {
                 if (data.status === 'connected') {
                     connected = true;
-                    updateConnectionUI(true, data.has_fix);
+                    updateConnectionUI(true, data.has_fix, null, null, data.source, data.position && data.position.device);
                     if (data.position) {
                         lastPosition = data.position;
                         updatePositionUI(data.position);
@@ -642,6 +646,34 @@ const GPS = (function() {
             });
     }
 
+    function setSource(source) {
+        fetch('/gps/source', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ source: source }),
+        })
+            .then(r => r.json())
+            .then(data => {
+                if (data.status !== 'ok') return;
+                updateSourceToggleUI(data.source);
+                if (connected) {
+                    unsubscribeFromStream();
+                    stopSkyPolling();
+                    stopStatusPolling();
+                    connected = false;
+                }
+                connect();
+            })
+            .catch(() => {});
+    }
+
+    function updateSourceToggleUI(source) {
+        const buttons = document.querySelectorAll('#gpsSourceToggle .gps-source-btn');
+        buttons.forEach(btn => {
+            btn.classList.toggle('active', btn.dataset.source === source);
+        });
+    }
+
     function disconnect() {
         unsubscribeFromStream();
         stopSkyPolling();
@@ -658,7 +690,8 @@ const GPS = (function() {
         if (data.type === 'position') {
             lastPosition = data;
             updatePositionUI(data);
-            updateConnectionUI(true, true);
+            const source = data.device && String(data.device).indexOf('meshtastic:') === 0 ? 'meshtastic' : 'gpsd';
+            updateConnectionUI(true, true, null, null, source, data.device);
             if (lastSky && skyRenderer) {
                 drawSkyView(lastSky.satellites || []);
             }
@@ -727,9 +760,9 @@ const GPS = (function() {
                 if (data.position) {
                     lastPosition = data.position;
                     updatePositionUI(data.position);
-                    updateConnectionUI(true, true);
+                    updateConnectionUI(true, true, null, null, data.source, data.device);
                 } else {
-                    updateConnectionUI(true, false);
+                    updateConnectionUI(true, false, null, null, data.source, data.device);
                 }
 
                 if (data.sky) {
@@ -757,7 +790,7 @@ const GPS = (function() {
     // UI Updates
     // ========================
 
-    function updateConnectionUI(isConnected, hasFix, state, message) {
+    function updateConnectionUI(isConnected, hasFix, state, message, source, device) {
         const dot = document.getElementById('gpsStatusDot');
         const text = document.getElementById('gpsStatusText');
         const connectBtn = document.getElementById('gpsConnectBtn');
@@ -783,7 +816,11 @@ const GPS = (function() {
             connectBtn.disabled = state === 'connecting';
         }
         if (disconnectBtn) disconnectBtn.style.display = isConnected ? '' : 'none';
-        if (devicePath) devicePath.textContent = isConnected ? 'gpsd://localhost:2947' : '';
+        if (devicePath) {
+            if (!isConnected) devicePath.textContent = '';
+            else if (source === 'meshtastic') devicePath.textContent = device ? `Meshtastic (${device.replace('meshtastic:', '')})` : 'Meshtastic';
+            else devicePath.textContent = 'gpsd://localhost:2947';
+        }
     }
 
     function updatePositionUI(pos) {
@@ -1713,6 +1750,7 @@ const GPS = (function() {
         init: init,
         connect: connect,
         disconnect: disconnect,
+        setSource: setSource,
         destroy: destroy,
     };
 })();

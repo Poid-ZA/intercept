@@ -11,7 +11,7 @@ import struct
 import threading
 import time
 
-from flask import Blueprint, Flask, Response, jsonify, request
+from flask import Blueprint, Flask, Response, jsonify, render_template, request
 
 from utils.responses import api_error, api_success
 
@@ -234,6 +234,13 @@ def get_receivers(force_refresh: bool = False) -> list[dict]:
 # ============================================
 # API ENDPOINTS
 # ============================================
+
+
+@websdr_bp.route("/dashboard")
+def websdr_dashboard():
+    """Popout WebSDR dashboard."""
+    embedded = request.args.get("embedded", "false") == "true"
+    return render_template("websdr_dashboard.html", embedded=embedded)
 
 
 @websdr_bp.route("/receivers")

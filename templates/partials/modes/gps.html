@@ -19,6 +19,14 @@
             <button class="run-btn" id="gpsConnectBtn" onclick="GPS.connect()">Connect</button>
             <button class="stop-btn" id="gpsDisconnectBtn" onclick="GPS.disconnect()" style="display: none;">Disconnect</button>
         </div>
+        <div class="gps-source-toggle" id="gpsSourceToggle" style="margin-top: 10px;">
+            <span class="gps-info-label" style="display: block; margin-bottom: 4px;">Source</span>
+            <div class="gps-source-toggle-group">
+                <button type="button" class="gps-source-btn" data-source="auto" onclick="GPS.setSource('auto')">Auto</button>
+                <button type="button" class="gps-source-btn" data-source="gpsd" onclick="GPS.setSource('gpsd')">GPSD</button>
+                <button type="button" class="gps-source-btn" data-source="meshtastic" onclick="GPS.setSource('meshtastic')">Meshtastic</button>
+            </div>
+        </div>
     </div>
 
     <!-- Fix Info -->

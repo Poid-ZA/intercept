@@ -251,3 +251,81 @@ def test_weather_with_mocked_response(client):
     assert data["condition"] == "Clear"
     assert data["humidity"] == "45"
     assert data["wind_mph"] == "8"
+
+
+def _meshtastic_fix(age_seconds: float = 0.0):
+    """Build a GPSPosition as utils.meshtastic registers one for the local node."""
+    from datetime import datetime, timedelta, timezone
+
+    from utils.gps import GPSPosition
+
+    return GPSPosition(
+        latitude=-33.984035,
+        longitude=18.466507,
+        altitude=12.0,
+        fix_quality=3,
+        timestamp=datetime.now(timezone.utc) - timedelta(seconds=age_seconds),
+        device="meshtastic:!a1b2c3d4",
+    )
+
+
+def _location_with_position(client, position):
+    """GET /system/location with utils.gps.get_current_position patched."""
+    import routes.system as mod
+
+    original = mod._get_observer_location
+
+    def _patched():
+        with patch("utils.gps.get_current_position", return_value=position):
+            return original()
+
+    mod._get_observer_location = _patched
+    try:
+        return client.get("/system/location")
+    finally:
+        mod._get_observer_location = original
+
+
+def test_location_reports_meshtastic_gps_source(client):
+    """A Meshtastic node's fix is used and labelled as such."""
+    _login(client)
+    resp = _location_with_position(client, _meshtastic_fix())
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["source"] == "gps"
+    assert data["gps_source"] == "meshtastic"
+    assert data["gps"]["device"] == "meshtastic:!a1b2c3d4"
+    assert data["lat"] == -33.984035
+    assert data["lon"] == 18.466507
+
+
+def test_location_ignores_stale_gps_fix(client):
+    """A fix older than the freshness window falls back to config/defaults."""
+    _login(client)
+    resp = _location_with_position(client, _meshtastic_fix(age_seconds=3600))
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["source"] in ("config", "default")
+    assert "gps_source" not in data
+
+
+def test_satellite_default_observer_uses_gps(client):
+    """Satellite predictions default to the shared observer location, not London."""
+    from routes.satellite import _default_observer
+
+    with patch(
+        "routes.system._get_observer_location",
+        return_value={"lat": -33.984035, "lon": 18.466507, "source": "gps"},
+    ):
+        assert _default_observer() == (-33.984035, 18.466507)
+
+
+def test_radiosonde_fallback_station_location_uses_gps(client):
+    """Radiosonde station config defaults to the shared observer location, not 0/0."""
+    from routes.radiosonde import _fallback_station_location
+
+    with patch(
+        "routes.system._get_observer_location",
+        return_value={"lat": -33.984035, "lon": 18.466507, "source": "gps"},
+    ):
+        assert _fallback_station_location() == (-33.984035, 18.466507)

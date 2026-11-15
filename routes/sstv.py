@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, send_file
+from flask import Blueprint, Response, jsonify, render_template, request, send_file
 
 import app as app_module
 from routes.satellite import get_cached_tle
@@ -812,3 +812,10 @@ def decode_file():
         # Clean up temp file
         with contextlib.suppress(Exception):
             Path(tmp_path).unlink()
+
+
+@sstv_bp.route("/dashboard")
+def sstv_dashboard():
+    """Popout ISS SSTV dashboard."""
+    embedded = request.args.get("embedded", "false") == "true"
+    return render_template("sstv_dashboard.html", embedded=embedded)
