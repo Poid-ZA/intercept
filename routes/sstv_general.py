@@ -13,13 +13,14 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, request, send_file
 
 import app as app_module
-from utils.event_pipeline import process_event
 from utils.logging import get_logger
-from utils.responses import api_error
+from utils.responses import api_error, start_failure
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.sstv import (
     get_general_sstv_decoder,
 )
+from utils.validation import validate_gain, validate_ppm
 
 logger = get_logger("intercept.sstv_general")
 
@@ -158,6 +159,8 @@ def get_status():
             "available": decoder.decoder_available is not None,
             "decoder": decoder.decoder_available,
             "running": decoder.is_running,
+            "frequency": decoder.frequency,
+            "modulation": decoder.modulation,
             "image_count": len(decoder.get_images()),
         }
     )
@@ -172,7 +175,9 @@ def start_decoder():
         {
             "frequency": 14.230,     // Frequency in MHz (required)
             "modulation": "usb",     // fm, usb, or lsb (auto-detected from frequency table if omitted)
-            "device": 0              // RTL-SDR device index
+            "device": 0,             // RTL-SDR device index
+            "gain": 40,              // Tuner gain in dB (omit or null for auto)
+            "ppm": 0                 // Frequency correction in PPM
         }
     """
     decoder = get_general_sstv_decoder()
@@ -184,6 +189,8 @@ def start_decoder():
         return jsonify(
             {
                 "status": "already_running",
+                "frequency": decoder.frequency,
+                "modulation": decoder.modulation,
             }
         )
 
@@ -195,6 +202,7 @@ def start_decoder():
             break
 
     data = request.get_json(silent=True) or {}
+    data = apply_device_defaults(data, fields=("ppm",))
     sdr_type_str = data.get("sdr_type", "rtlsdr")
 
     if sdr_type_str != "rtlsdr":
@@ -226,6 +234,14 @@ def start_decoder():
     if modulation not in ("fm", "usb", "lsb"):
         return api_error("Modulation must be fm, usb, or lsb", 400)
 
+    gain = data.get("gain")
+    ppm = data.get("ppm")
+    try:
+        gain = validate_gain(gain) if gain not in (None, "") else None
+        ppm = validate_ppm(ppm) if ppm not in (None, "") else None
+    except ValueError as e:
+        return api_error(str(e), 400)
+
     # Claim SDR device
     global _sstv_general_active_device, _sstv_general_active_sdr_type
     device_int = int(device_index)
@@ -239,6 +255,8 @@ def start_decoder():
         frequency=frequency,
         device_index=device_index,
         modulation=modulation,
+        gain=gain,
+        ppm=ppm,
     )
 
     if success:
@@ -254,7 +272,7 @@ def start_decoder():
         )
     else:
         app_module.release_sdr_device(device_int, sdr_type_str)
-        return api_error("Failed to start decoder", 500)
+        return start_failure(decoder.last_start_error)
 
 
 @sstv_general_bp.route("/stop", methods=["POST"])
@@ -360,16 +378,12 @@ def delete_all_images():
 def stream_progress():
     """SSE stream of SSTV decode progress."""
 
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("sstv_general", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=_sstv_general_queue,
             channel_key="sstv_general",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

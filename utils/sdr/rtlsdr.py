@@ -7,15 +7,47 @@ with existing RTL-SDR installations. No SoapySDR dependency required.
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import re
 import subprocess
+import sys
+import tempfile
 
 from utils.dependencies import get_tool_path
 
 from .base import CommandBuilder, SDRCapabilities, SDRDevice, SDRType
+from .csdr_pipeline import CSDR_MODULATIONS, capture_plan, csdr_demod_script, decimations
 
 logger = logging.getLogger("intercept.sdr.rtlsdr")
+
+# Directory dump1090 writes aircraft.json to (Enhanced Mode-S / cockpit fields).
+# The ADS-B route reads this to enrich SBS-tracked aircraft.
+DUMP1090_JSON_DIR = os.path.join(tempfile.gettempdir(), "intercept_dump1090_json")
+
+# rtl_tcp client feeding the csdr pipeline for remote devices
+RTLTCP_IQ_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "rtltcp_iq.py")
+
+# RTL2832 sample rates: 225001-300000 or 900001-3200000 S/s. The low band
+# keeps rtl_tcp traffic at ~0.5 MB/s for narrowband modes.
+_RTL_LOW_RATE_MIN = 225_001
+_RTL_LOW_RATE_MAX = 300_000
+_RTL_HIGH_RATE_MIN = 900_001
+
+
+def _dump1090_supports_write_json(dump1090_path: str) -> bool:
+    """Whether the installed dump1090/readsb variant supports --write-json.
+
+    dump1090-fa, dump1090-mutability and readsb do; the original Malcolm
+    Robb dump1090 does not. Adding an unsupported flag would abort startup,
+    so this is feature-detected before the flag is used.
+    """
+    try:
+        result = subprocess.run([dump1090_path, "--help"], capture_output=True, text=True, timeout=5)
+        return "--write-json" in (result.stdout + result.stderr)
+    except (subprocess.SubprocessError, OSError):
+        return False
 
 
 def _rtl_fm_demod_mode(modulation: str) -> str:
@@ -93,6 +125,28 @@ def disable_bias_t_via_rtl_biast(device_index: int = 0) -> bool:
         return False
 
 
+def rtl_startup_error(tool: str, process: subprocess.Popen, device: SDRDevice) -> str | None:
+    """Why an rtl_* tool died right after launch, or None if it is still running.
+
+    Call after PROCESS_START_WAIT, before any thread starts reading stderr.
+    """
+    if process.poll() is None:
+        return None
+    stderr = ""
+    with contextlib.suppress(Exception):
+        stderr = (process.stderr.read() or b"").decode("utf-8", errors="replace").strip()
+    message = f"{tool} exited during startup (code {process.returncode})"
+    if stderr:
+        message += f": {stderr[-500:].rstrip('.')}"
+    if device.is_network:
+        message += (
+            f". Check that the rtl_tcp server {device.rtl_tcp_host}:{device.rtl_tcp_port} "
+            "is running, reachable and not serving another client (rtl_tcp accepts one "
+            "at a time); FM/AM over rtl_tcp needs csdr installed."
+        )
+    return message
+
+
 def _get_dump1090_bias_t_flag(dump1090_path: str) -> str | None:
     """Detect the correct bias-t flag for the installed dump1090 variant.
 
@@ -158,12 +212,32 @@ class RTLSDRCommandBuilder(CommandBuilder):
         """
         Build rtl_fm command for FM demodulation.
 
-        Used for pager decoding. Supports local devices and rtl_tcp connections.
+        Used for pager decoding. Supports local devices and rtl_tcp connections:
+        stock rtl_fm has no rtl_tcp client, so remote devices stream I/Q
+        through rtltcp_iq.py into the shared csdr pipeline instead.
 
         Args:
             direct_sampling: Enable direct sampling mode (0=off, 1=I-branch,
                 2=Q-branch). Use 2 for HF reception below 24 MHz.
         """
+        csdr_modulation = "wfm" if str(modulation).lower() == "wbfm" else str(modulation).lower()
+        if device.is_network and csdr_modulation in CSDR_MODULATIONS:
+            csdr_path = get_tool_path("csdr")
+            if csdr_path:
+                return self._build_rtltcp_csdr_command(
+                    device,
+                    frequency_mhz,
+                    sample_rate,
+                    gain,
+                    ppm,
+                    csdr_modulation,
+                    squelch,
+                    bias_t,
+                    direct_sampling,
+                    csdr_path,
+                )
+            logger.warning("csdr not found; rtl_fm cannot open rtl_tcp devices, so this remote start will fail")
+
         rtl_fm_path = get_tool_path("rtl_fm") or "rtl_fm"
         demod_mode = _rtl_fm_demod_mode(modulation)
         cmd = [
@@ -206,7 +280,50 @@ class RTLSDRCommandBuilder(CommandBuilder):
 
         return cmd
 
-    def build_adsb_command(self, device: SDRDevice, gain: float | None = None, bias_t: bool = False) -> list[str]:
+    def _build_rtltcp_csdr_command(
+        self,
+        device: SDRDevice,
+        frequency_mhz: float,
+        sample_rate: int,
+        gain: float | None,
+        ppm: int | None,
+        modulation: str,
+        squelch: int | None,
+        bias_t: bool,
+        direct_sampling: int | None,
+        csdr_path: str,
+    ) -> list[str]:
+        """rtltcp_iq.py (CU8 from the rtl_tcp server) | csdr demod, s16 out."""
+        min_rate = _RTL_LOW_RATE_MIN
+        capture_rate, tune_hz = capture_plan(frequency_mhz, sample_rate, modulation, min_rate)
+        channel_decim, _ = decimations(sample_rate, modulation, min_rate)
+        # The low band only works when the channel (capture/2/decim wide on
+        # each side) stays clear of the DC spike capture/8 away
+        if capture_rate > _RTL_LOW_RATE_MAX or channel_decim <= 4:
+            min_rate = _RTL_HIGH_RATE_MIN
+            capture_rate, tune_hz = capture_plan(frequency_mhz, sample_rate, modulation, min_rate)
+
+        source = [sys.executable, RTLTCP_IQ_SCRIPT, "--host", str(device.rtl_tcp_host)]
+        source += ["--port", str(device.rtl_tcp_port), "--freq", str(tune_hz), "--rate", str(capture_rate)]
+        if gain is not None and gain > 0:
+            source += ["--gain", str(gain)]
+        if ppm:
+            source += ["--ppm", str(ppm)]
+        if direct_sampling in (1, 2):
+            source += ["--direct-sampling", str(direct_sampling)]
+        if bias_t:
+            source.append("--bias-t")
+
+        script = csdr_demod_script(source, csdr_path, modulation, sample_rate, min_rate, squelch)
+        return [get_tool_path("bash") or "bash", "-c", script]
+
+    def build_adsb_command(
+        self,
+        device: SDRDevice,
+        gain: float | None = None,
+        bias_t: bool = False,
+        ppm: int | None = None,
+    ) -> list[str]:
         """
         Build dump1090 command for ADS-B decoding.
 
@@ -225,8 +342,18 @@ class RTLSDRCommandBuilder(CommandBuilder):
         dump1090_path = get_tool_path("dump1090") or "dump1090"
         cmd = [dump1090_path, "--net", "--device-index", str(device.index), "--quiet"]
 
+        # Enhanced Mode-S / cockpit fields (roll, IAS/Mach, mag heading,
+        # selected altitude) are only in dump1090's JSON output, not the SBS
+        # port. Emit aircraft.json when the variant supports it (feature-detected
+        # so builds without --write-json still start).
+        if _dump1090_supports_write_json(dump1090_path):
+            cmd.extend(["--write-json", DUMP1090_JSON_DIR])
+
         if gain is not None:
             cmd.extend(["--gain", str(int(gain))])
+
+        if ppm:
+            cmd.extend(["--ppm", str(ppm)])
 
         if bias_t:
             bias_t_flag = _get_dump1090_bias_t_flag(dump1090_path)
@@ -286,6 +413,7 @@ class RTLSDRCommandBuilder(CommandBuilder):
         tcp_port: int = 10110,
         udp_host: str | None = None,
         udp_port: int | None = None,
+        ppm: int | None = None,
     ) -> list[str]:
         """
         Build AIS-catcher command for AIS vessel tracking.
@@ -310,6 +438,9 @@ class RTLSDRCommandBuilder(CommandBuilder):
 
         if gain is not None and gain > 0:
             cmd.extend(["-gr", "TUNER", str(int(gain))])
+
+        if ppm:
+            cmd.extend(["-p", str(ppm)])
 
         if bias_t:
             cmd.extend(["-gr", "BIASTEE", "on"])

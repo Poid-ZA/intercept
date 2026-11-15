@@ -27,45 +27,45 @@ const SignalCards = (function() {
             minimal: {
                 label: 'Minimal',
                 description: 'Near minimum observable level',
-                interpretation: 'may represent background activity or a distant source',
+                interpretation: 'background activity or a distant source',
                 confidence: 'low',
-                color: '#888888',
+                color: 'var(--text-dim, #6b7280)',
                 icon: 'signal-0',
                 bars: 1
             },
             weak: {
                 label: 'Weak',
                 description: 'Low-level signal present',
-                interpretation: 'possibly distant or partially obstructed',
+                interpretation: 'a distant or partially obstructed source',
                 confidence: 'low',
-                color: '#6baed6',
+                color: 'var(--accent-red, #e25d5d)',
                 icon: 'signal-1',
                 bars: 2
             },
             moderate: {
                 label: 'Moderate',
                 description: 'Consistent signal presence',
-                interpretation: 'likely in proximity',
+                interpretation: 'a source in proximity',
                 confidence: 'medium',
-                color: '#3182bd',
+                color: 'var(--accent-amber, #d6a85e)',
                 icon: 'signal-2',
                 bars: 3
             },
             strong: {
                 label: 'Strong',
                 description: 'Clear, consistent signal',
-                interpretation: 'suggests relatively close proximity',
+                interpretation: 'a source in relatively close proximity',
                 confidence: 'medium',
-                color: '#fd8d3c',
+                color: 'var(--accent-green, #38c180)',
                 icon: 'signal-3',
                 bars: 4
             },
             very_strong: {
                 label: 'Very Strong',
                 description: 'Elevated signal level',
-                interpretation: 'consistent with a nearby source',
+                interpretation: 'a nearby source',
                 confidence: 'high',
-                color: '#e6550d',
+                color: 'var(--accent-green, #38c180)',
                 icon: 'signal-4',
                 bars: 5
             }
@@ -92,7 +92,7 @@ const SignalCards = (function() {
             },
             sustained: {
                 label: 'Sustained',
-                modifier: 'observed over sustained period',
+                modifier: 'observed over a sustained period',
                 confidence_impact: 'supports assessment confidence'
             },
             persistent: {
@@ -188,13 +188,15 @@ const SignalCards = (function() {
             const strengthInfo = this.getStrengthInfo(rssi);
             const durationInfo = this.getDurationInfo(durationSeconds);
             const confidence = this.calculateConfidence(rssi, durationSeconds, observationCount);
+            // Labels are title case ("Very Strong"); mid-sentence they are not.
+            const label = strengthInfo.label.charAt(0) + strengthInfo.label.slice(1).toLowerCase();
 
             if (confidence === 'high') {
-                return `${strengthInfo.label}, ${durationInfo.label.toLowerCase()} signal with characteristics that suggest a transmitting device may be nearby`;
+                return `${label}, ${durationInfo.label.toLowerCase()} signal with characteristics that suggest a transmitting device may be nearby`;
             } else if (confidence === 'medium') {
-                return `${strengthInfo.label}, ${durationInfo.label.toLowerCase()} signal that may indicate nearby device activity`;
+                return `${label}, ${durationInfo.label.toLowerCase()} signal that may indicate nearby device activity`;
             } else {
-                return `${durationInfo.modifier.charAt(0).toUpperCase() + durationInfo.modifier.slice(1)} ${strengthInfo.label.toLowerCase()} signal consistent with possible nearby device activity`;
+                return `${label} signal, ${durationInfo.modifier}, consistent with possible nearby device activity`;
             }
         },
 
@@ -211,43 +213,8 @@ const SignalCards = (function() {
             } else if (confidence === 'medium') {
                 return `Observed pattern may indicate ${base}`;
             } else {
-                return `With limited data, this signal may represent ${base} or environmental factors`;
+                return `With limited data, this signal may represent ${base}, or environmental factors`;
             }
-        },
-
-        /**
-         * Estimate range from RSSI (with heavy caveats)
-         */
-        estimateRange(rssi) {
-            if (rssi === null || rssi === undefined) {
-                return { estimate: 'Unknown', disclaimer: 'Insufficient signal data' };
-            }
-            const val = parseFloat(rssi);
-            let estimate, rangeMin, rangeMax;
-
-            if (val > -40) {
-                estimate = '< 3 meters';
-                rangeMin = 0; rangeMax = 3;
-            } else if (val > -55) {
-                estimate = '3-10 meters';
-                rangeMin = 3; rangeMax = 10;
-            } else if (val > -70) {
-                estimate = '5-20 meters';
-                rangeMin = 5; rangeMax = 20;
-            } else if (val > -85) {
-                estimate = '10-50 meters';
-                rangeMin = 10; rangeMax = 50;
-            } else {
-                estimate = '> 30 meters or heavily obstructed';
-                rangeMin = 30; rangeMax = null;
-            }
-
-            return {
-                estimate,
-                rangeMin,
-                rangeMax,
-                disclaimer: 'Range estimates are approximate and influenced by physical obstructions, interference, and transmitter power'
-            };
         }
     };
 
@@ -301,21 +268,7 @@ const SignalCards = (function() {
      * Format timestamp to relative time
      */
     function formatRelativeTime(timestamp) {
-        if (!timestamp) return '';
-        let date = new Date(timestamp);
-        // Handle time-only strings like "HH:MM:SS" (from pager/sensor backends)
-        if (isNaN(date.getTime()) && /^\d{1,2}:\d{2}(:\d{2})?$/.test(timestamp)) {
-            const today = new Date();
-            date = new Date(today.toDateString() + ' ' + timestamp);
-        }
-        if (isNaN(date.getTime())) return timestamp;
-        const now = new Date();
-        const diff = Math.floor((now - date) / 1000);
-
-        if (diff < 60) return 'Just now';
-        if (diff < 3600) return Math.floor(diff / 60) + ' min ago';
-        if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
-        return date.toLocaleDateString();
+        return InterceptTime.relative(timestamp);
     }
 
     /**
@@ -473,26 +426,26 @@ const SignalCards = (function() {
         const showTooltip = options.showTooltip !== false;
         const compact = options.compact === true;
 
-        // Create signal bars SVG
+        // Signal bars, coloured by the same bands as the radars and lists
+        // (strong green, moderate amber, weak red), unlit bars faint
         const bars = info.bars;
+        const unlit = 'rgba(255, 255, 255, 0.12)';
         const barsSvg = `
             <svg class="signal-strength-bars" viewBox="0 0 20 16" width="${compact ? 16 : 20}" height="${compact ? 12 : 16}">
-                <rect x="0" y="12" width="3" height="4" fill="${bars >= 1 ? info.color : '#444'}"/>
-                <rect x="4" y="9" width="3" height="7" fill="${bars >= 2 ? info.color : '#444'}"/>
-                <rect x="8" y="6" width="3" height="10" fill="${bars >= 3 ? info.color : '#444'}"/>
-                <rect x="12" y="3" width="3" height="13" fill="${bars >= 4 ? info.color : '#444'}"/>
-                <rect x="16" y="0" width="3" height="16" fill="${bars >= 5 ? info.color : '#444'}"/>
+                <rect x="0" y="12" width="3" height="4" rx="1" fill="${bars >= 1 ? info.color : unlit}"/>
+                <rect x="4" y="9" width="3" height="7" rx="1" fill="${bars >= 2 ? info.color : unlit}"/>
+                <rect x="8" y="6" width="3" height="10" rx="1" fill="${bars >= 3 ? info.color : unlit}"/>
+                <rect x="12" y="3" width="3" height="13" rx="1" fill="${bars >= 4 ? info.color : unlit}"/>
+                <rect x="16" y="0" width="3" height="16" rx="1" fill="${bars >= 5 ? info.color : unlit}"/>
             </svg>
         `;
 
         // Build tooltip content
         let tooltipContent = '';
         if (showTooltip) {
-            const rangeEst = SignalClassification.estimateRange(rssi);
             tooltipContent = `
                 ${info.label} signal (${rssi} dBm)
                 ${info.description}
-                Est. range: ${rangeEst.estimate}
                 Confidence: ${info.confidence}
             `.trim();
         }
@@ -527,7 +480,6 @@ const SignalCards = (function() {
         const strengthInfo = SignalClassification.getStrengthInfo(rssi);
         const durationInfo = SignalClassification.getDurationInfo(durationSeconds);
         const confidence = SignalClassification.calculateConfidence(rssi, durationSeconds, observationCount);
-        const rangeEst = SignalClassification.estimateRange(rssi);
         const interpretation = SignalClassification.generateInterpretation(rssi, durationSeconds, observationCount);
 
         return `
@@ -547,16 +499,12 @@ const SignalCards = (function() {
                         <span class="signal-advanced-value">${durationInfo.label}</span>
                     </div>
                     <div class="signal-advanced-item">
-                        <span class="signal-advanced-label">Est. Range</span>
-                        <span class="signal-advanced-value">${rangeEst.estimate}</span>
-                    </div>
-                    <div class="signal-advanced-item">
                         <span class="signal-advanced-label">Confidence</span>
                         <span class="signal-advanced-value signal-confidence-${confidence}">${confidence.charAt(0).toUpperCase() + confidence.slice(1)}</span>
                     </div>
                 </div>
                 <div class="signal-assessment-caveat">
-                    Note: ${rangeEst.disclaimer}
+                    Note: signal strength depends on obstructions, interference and transmitter power; a single receiver cannot measure distance from it.
                 </div>
             </div>
         `;

@@ -31,12 +31,111 @@ const SSTVGeneral = (function() {
     let sstvGeneralScopeLastWaveAt = 0;
     let sstvGeneralScopeLastInputSample = 0;
 
+    const SETTINGS_KEY = 'sstvGeneralSettings';
+    const SETTINGS_INPUT_IDS = ['sstvGeneralPresetFreq', 'sstvGeneralFrequency', 'sstvGeneralModulation', 'sstvGeneralGain', 'sstvGeneralPpm'];
+    let settingsListenersAttached = false;
+
     /**
      * Initialize the SSTV General mode
      */
     function init() {
+        loadDecoderSettings();
         checkStatus();
         loadImages();
+    }
+
+    /**
+     * Read decoder settings from the sidebar
+     */
+    function getDecoderSettings() {
+        const freq = parseFloat(document.getElementById('sstvGeneralFrequency')?.value);
+        const gainValue = document.getElementById('sstvGeneralGain')?.value.trim();
+        const ppm = parseInt(document.getElementById('sstvGeneralPpm')?.value, 10);
+        return {
+            frequency: Number.isFinite(freq) ? freq : 14.230,
+            modulation: document.getElementById('sstvGeneralModulation')?.value || 'usb',
+            gain: gainValue ? parseFloat(gainValue) : null,
+            ppm: Number.isFinite(ppm) ? ppm : null,  // blank: the device's saved PPM
+        };
+    }
+
+    /**
+     * Restore saved decoder settings and keep them saved on change
+     */
+    function loadDecoderSettings() {
+        let saved = null;
+        try {
+            saved = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
+        } catch (e) {
+            saved = null;
+        }
+        if (saved) {
+            const freqInput = document.getElementById('sstvGeneralFrequency');
+            const modSelect = document.getElementById('sstvGeneralModulation');
+            const gainInput = document.getElementById('sstvGeneralGain');
+            const ppmInput = document.getElementById('sstvGeneralPpm');
+            if (freqInput && Number.isFinite(saved.frequency)) freqInput.value = saved.frequency.toFixed(3);
+            if (modSelect && ['fm', 'usb', 'lsb'].includes(saved.modulation)) modSelect.value = saved.modulation;
+            if (gainInput) gainInput.value = Number.isFinite(saved.gain) ? saved.gain : '';
+            // Older versions saved 0 for a blank box; restore it as blank so the
+            // device's saved PPM applies instead of being overridden by 0.
+            if (ppmInput) ppmInput.value = Number.isFinite(saved.ppm) && saved.ppm !== 0 ? saved.ppm : '';
+        }
+        syncPresetToSettings();
+        updateStripDisplay();
+
+        if (!settingsListenersAttached) {
+            ['sstvGeneralFrequency', 'sstvGeneralModulation', 'sstvGeneralGain', 'sstvGeneralPpm'].forEach(id => {
+                document.getElementById(id)?.addEventListener('change', onDecoderSettingChange);
+            });
+            settingsListenersAttached = true;
+        }
+    }
+
+    function saveDecoderSettings() {
+        try {
+            localStorage.setItem(SETTINGS_KEY, JSON.stringify(getDecoderSettings()));
+        } catch (e) {
+            // Storage unavailable; settings just won't persist
+        }
+    }
+
+    function onDecoderSettingChange() {
+        syncPresetToSettings();
+        updateStripDisplay();
+        saveDecoderSettings();
+    }
+
+    /**
+     * Show the matching preset, or none when the inputs match no preset
+     */
+    function syncPresetToSettings() {
+        const presetSelect = document.getElementById('sstvGeneralPresetFreq');
+        if (!presetSelect) return;
+        const { frequency, modulation } = getDecoderSettings();
+        const match = Array.from(presetSelect.options).find(o => {
+            if (!o.value) return false;
+            const [freq, mod] = o.value.split('|');
+            return parseFloat(freq) === frequency && mod === modulation;
+        });
+        presetSelect.value = match ? match.value : '';
+    }
+
+    function updateStripDisplay(frequency, modulation) {
+        const settings = getDecoderSettings();
+        const freq = Number.isFinite(frequency) ? frequency : settings.frequency;
+        const mod = modulation || settings.modulation;
+        const stripFreq = document.getElementById('sstvGeneralStripFreq');
+        const stripMod = document.getElementById('sstvGeneralStripMod');
+        if (stripFreq) stripFreq.textContent = freq.toFixed(3);
+        if (stripMod) stripMod.textContent = mod.toUpperCase();
+    }
+
+    function setDecoderSettingsLocked(locked) {
+        SETTINGS_INPUT_IDS.forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.disabled = locked;
+        });
     }
 
     /**
@@ -52,14 +151,24 @@ const SSTVGeneral = (function() {
         const freqInput = document.getElementById('sstvGeneralFrequency');
         const modSelect = document.getElementById('sstvGeneralModulation');
 
-        if (freqInput) freqInput.value = freq;
+        if (freqInput) freqInput.value = freq.toFixed(3);
         if (modSelect) modSelect.value = mod;
 
-        // Update strip display
-        const stripFreq = document.getElementById('sstvGeneralStripFreq');
-        const stripMod = document.getElementById('sstvGeneralStripMod');
-        if (stripFreq) stripFreq.textContent = freq.toFixed(3);
-        if (stripMod) stripMod.textContent = mod.toUpperCase();
+        updateStripDisplay();
+        saveDecoderSettings();
+    }
+
+    /**
+     * When a typed frequency matches a preset, use that preset's modulation
+     * (HF SSTV is sideband, VHF/UHF is FM); other frequencies keep the choice
+     */
+    function syncModulationToFrequency() {
+        const freq = parseFloat(document.getElementById('sstvGeneralFrequency')?.value);
+        const presetSelect = document.getElementById('sstvGeneralPresetFreq');
+        if (!Number.isFinite(freq) || !presetSelect) return;
+        const match = Array.from(presetSelect.options).find(o => o.value && parseFloat(o.value.split('|')[0]) === freq);
+        presetSelect.value = match ? match.value : '';
+        if (match) selectPreset(match.value);
     }
 
     /**
@@ -78,7 +187,13 @@ const SSTVGeneral = (function() {
 
             if (data.running) {
                 isRunning = true;
-                updateStatusUI('listening', 'Listening...');
+                const runningFrequency = Number(data.frequency);
+                if (Number.isFinite(runningFrequency) && data.modulation) {
+                    updateStripDisplay(runningFrequency, data.modulation);
+                    updateStatusUI('listening', `${runningFrequency.toFixed(3)} MHz ${data.modulation.toUpperCase()}`);
+                } else {
+                    updateStatusUI('listening', 'Listening...');
+                }
                 startStream();
             } else {
                 updateStatusUI('idle', 'Idle');
@@ -94,12 +209,9 @@ const SSTVGeneral = (function() {
      * Start SSTV decoder
      */
     async function start() {
-        const freqInput = document.getElementById('sstvGeneralFrequency');
-        const modSelect = document.getElementById('sstvGeneralModulation');
         const deviceSelect = document.getElementById('deviceSelect');
 
-        const frequency = parseFloat(freqInput?.value || '14.230');
-        const modulation = modSelect?.value || 'fm';
+        const settings = getDecoderSettings();
         const device = parseInt(deviceSelect?.value || '0', 10);
 
         updateStatusUI('connecting', 'Starting...');
@@ -108,22 +220,19 @@ const SSTVGeneral = (function() {
             const response = await fetch('/sstv-general/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ frequency, modulation, device, sdr_type: typeof getSelectedSDRType === 'function' ? getSelectedSDRType() : 'rtlsdr' })
+                body: JSON.stringify({ ...settings, device, sdr_type: typeof getSelectedSDRType === 'function' ? getSelectedSDRType() : 'rtlsdr' })
             });
 
             const data = await response.json();
 
             if (data.status === 'started' || data.status === 'already_running') {
                 isRunning = true;
-                updateStatusUI('listening', `${frequency} MHz ${modulation.toUpperCase()}`);
+                const frequency = Number(data.frequency || settings.frequency);
+                const modulation = String(data.modulation || settings.modulation);
+                updateStripDisplay(frequency, modulation);
+                updateStatusUI('listening', `${frequency.toFixed(3)} MHz ${modulation.toUpperCase()}`);
                 startStream();
-                showNotification('SSTV', `Listening on ${frequency} MHz ${modulation.toUpperCase()}`);
-
-                // Update strip
-                const stripFreq = document.getElementById('sstvGeneralStripFreq');
-                const stripMod = document.getElementById('sstvGeneralStripMod');
-                if (stripFreq) stripFreq.textContent = frequency.toFixed(3);
-                if (stripMod) stripMod.textContent = modulation.toUpperCase();
+                showNotification('SSTV', `Listening on ${frequency.toFixed(3)} MHz ${modulation.toUpperCase()}`);
             } else {
                 updateStatusUI('idle', 'Start failed');
                 showStatusMessage(data.message || 'Failed to start decoder', 'error');
@@ -173,6 +282,8 @@ const SSTVGeneral = (function() {
         if (statusText) {
             statusText.textContent = text || status;
         }
+
+        setDecoderSettingsLocked(['connecting', 'listening', 'detecting', 'decoding'].includes(status));
 
         if (startBtn && stopBtn) {
             if (status === 'listening' || status === 'decoding') {
@@ -419,8 +530,8 @@ const SSTVGeneral = (function() {
             if (sstvGeneralScopeTone === 'leader') { toneLabel.textContent = 'LEADER'; toneLabel.style.color = '#0f0'; }
             else if (sstvGeneralScopeTone === 'sync') { toneLabel.textContent = 'SYNC'; toneLabel.style.color = '#0ff'; }
             else if (sstvGeneralScopeTone === 'decoding') { toneLabel.textContent = 'DECODING'; toneLabel.style.color = '#fa0'; }
-            else if (sstvGeneralScopeTone === 'noise') { toneLabel.textContent = 'NOISE'; toneLabel.style.color = '#555'; }
-            else { toneLabel.textContent = 'QUIET'; toneLabel.style.color = '#444'; }
+            else if (sstvGeneralScopeTone === 'noise') { toneLabel.textContent = 'NOISE'; toneLabel.style.color = 'var(--text-dim)'; }
+            else { toneLabel.textContent = 'QUIET'; toneLabel.style.color = 'var(--text-dim)'; }
         }
         if (statusLabel) {
             const waveIsFresh = (performance.now() - sstvGeneralScopeLastWaveAt) < 1000;
@@ -432,7 +543,7 @@ const SSTVGeneral = (function() {
                 statusLabel.style.color = '#e0b8ff';
             } else {
                 statusLabel.textContent = 'QUIET';
-                statusLabel.style.color = '#555';
+                statusLabel.style.color = 'var(--text-dim)';
             }
         }
 
@@ -530,6 +641,12 @@ const SSTVGeneral = (function() {
             if (data.signal_level !== undefined) {
                 renderSignalMonitor(data);
             }
+        } else if (data.status === 'error') {
+            // The backend has stopped the decoder; reflect that instead of freezing
+            isRunning = false;
+            stopStream();
+            updateStatusUI('idle', data.message || 'Decoder stopped');
+            showStatusMessage(data.message || 'SSTV decoder stopped unexpectedly', 'error');
         }
     }
 
@@ -893,6 +1010,7 @@ const SSTVGeneral = (function() {
         deleteAllImages,
         downloadImage,
         selectPreset,
+        syncModulationToFrequency,
         destroy
     };
 })();

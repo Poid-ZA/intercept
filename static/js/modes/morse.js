@@ -99,7 +99,7 @@ var MorseMode = (function () {
         var config = {
             frequency: (el('morseFrequency') && el('morseFrequency').value) || '14.060',
             gain: (el('morseGain') && el('morseGain').value) || '40',
-            ppm: (el('morsePPM') && el('morsePPM').value) || '0',
+            ppm: (el('morsePPM') && el('morsePPM').value) || '',
             device: (el('deviceSelect') && el('deviceSelect').value) || '0',
             sdr_type: (el('sdrTypeSelect') && el('sdrTypeSelect').value) || 'rtlsdr',
             bias_t: (typeof getBiasTEnabled === 'function') ? getBiasTEnabled() : false,
@@ -110,9 +110,7 @@ var MorseMode = (function () {
             tone_lock: !!(el('morseToneLock') && el('morseToneLock').checked),
             threshold_mode: (el('morseThresholdMode') && el('morseThresholdMode').value) || 'auto',
             manual_threshold: (el('morseManualThreshold') && el('morseManualThreshold').value) || '0',
-            threshold_multiplier: (el('morseThresholdMultiplier') && el('morseThresholdMultiplier').value) || '2.8',
-            threshold_offset: (el('morseThresholdOffset') && el('morseThresholdOffset').value) || '0',
-            signal_gate: (el('morseSignalGate') && el('morseSignalGate').value) || '0.05',
+            signal_gate: (el('morseSignalGate') && el('morseSignalGate').value) || '0',
             wpm_mode: (el('morseWpmMode') && el('morseWpmMode').value) || 'auto',
             wpm: (el('morseWpm') && el('morseWpm').value) || '15',
             wpm_lock: !!(el('morseWpmLock') && el('morseWpmLock').checked),
@@ -135,7 +133,7 @@ var MorseMode = (function () {
             var payload = {
                 frequency: (el('morseFrequency') && el('morseFrequency').value) || '14.060',
                 gain: (el('morseGain') && el('morseGain').value) || '40',
-                ppm: (el('morsePPM') && el('morsePPM').value) || '0',
+                ppm: (el('morsePPM') && el('morsePPM').value) || '',
                 detect_mode: (el('morseDetectMode') && el('morseDetectMode').value) || 'goertzel',
                 tone_freq: (el('morseToneFreq') && el('morseToneFreq').value) || '700',
                 bandwidth_hz: (el('morseBandwidth') && el('morseBandwidth').value) || '200',
@@ -143,9 +141,7 @@ var MorseMode = (function () {
                 tone_lock: !!(el('morseToneLock') && el('morseToneLock').checked),
                 threshold_mode: (el('morseThresholdMode') && el('morseThresholdMode').value) || 'auto',
                 manual_threshold: (el('morseManualThreshold') && el('morseManualThreshold').value) || '0',
-                threshold_multiplier: (el('morseThresholdMultiplier') && el('morseThresholdMultiplier').value) || '2.8',
-                threshold_offset: (el('morseThresholdOffset') && el('morseThresholdOffset').value) || '0',
-                signal_gate: (el('morseSignalGate') && el('morseSignalGate').value) || '0.05',
+                signal_gate: (el('morseSignalGate') && el('morseSignalGate').value) || '0',
                 wpm_mode: (el('morseWpmMode') && el('morseWpmMode').value) || 'auto',
                 wpm: (el('morseWpm') && el('morseWpm').value) || '15',
                 wpm_lock: !!(el('morseWpmLock') && el('morseWpmLock').checked),
@@ -168,8 +164,6 @@ var MorseMode = (function () {
         if (el('morseBandwidth') && settings.bandwidth_hz !== undefined) el('morseBandwidth').value = settings.bandwidth_hz;
         if (el('morseThresholdMode') && settings.threshold_mode !== undefined) el('morseThresholdMode').value = settings.threshold_mode;
         if (el('morseManualThreshold') && settings.manual_threshold !== undefined) el('morseManualThreshold').value = settings.manual_threshold;
-        if (el('morseThresholdMultiplier') && settings.threshold_multiplier !== undefined) el('morseThresholdMultiplier').value = settings.threshold_multiplier;
-        if (el('morseThresholdOffset') && settings.threshold_offset !== undefined) el('morseThresholdOffset').value = settings.threshold_offset;
         if (el('morseSignalGate') && settings.signal_gate !== undefined) el('morseSignalGate').value = settings.signal_gate;
         if (el('morseWpmMode') && settings.wpm_mode !== undefined) el('morseWpmMode').value = settings.wpm_mode;
         if (el('morseWpm') && settings.wpm !== undefined) el('morseWpm').value = settings.wpm;
@@ -216,9 +210,8 @@ var MorseMode = (function () {
         var ids = [
             'morseFrequency', 'morseGain', 'morsePPM', 'morseDetectMode', 'morseToneFreq',
             'morseBandwidth', 'morseAutoToneTrack', 'morseToneLock', 'morseThresholdMode',
-            'morseManualThreshold', 'morseThresholdMultiplier', 'morseThresholdOffset',
-            'morseSignalGate', 'morseWpmMode', 'morseWpm', 'morseWpmLock',
-            'morseShowRaw', 'morseShowDiag'
+            'morseManualThreshold', 'morseSignalGate', 'morseWpmMode', 'morseWpm',
+            'morseWpmLock', 'morseShowRaw', 'morseShowDiag'
         ];
 
         ids.forEach(function (id) {
@@ -667,20 +660,12 @@ var MorseMode = (function () {
         if (metrics.snr !== undefined) {
             state.lastMetrics.snr = Number(metrics.snr) || 0;
         }
-        if (metrics.noise_ref !== undefined) {
-            state.lastMetrics.noise_ref = Number(metrics.noise_ref) || 0;
-        }
-        if (metrics.snr_on !== undefined) {
-            state.lastMetrics.snr_on = Number(metrics.snr_on) || 0;
-        }
-        if (metrics.snr_off !== undefined) {
-            state.lastMetrics.snr_off = Number(metrics.snr_off) || 0;
-        }
 
         updateMetricLabel('morseMetricTone', 'TONE ' + Math.round(state.lastMetrics.tone_freq || 700) + ' Hz');
-        updateMetricLabel('morseMetricLevel', 'SNR ' + (state.lastMetrics.snr || 0).toFixed(2) + ' (on>' + (state.lastMetrics.snr_on || 0).toFixed(2) + ' off>' + (state.lastMetrics.snr_off || 0).toFixed(2) + ')');
+        updateMetricLabel('morseMetricLevel', 'LEVEL ' + (state.lastMetrics.level || 0).toFixed(2)
+            + (state.lastMetrics.snr ? ' / SNR ' + state.lastMetrics.snr.toFixed(1) : ''));
         updateMetricLabel('morseMetricThreshold', 'THRESH ' + (state.lastMetrics.threshold || 0).toFixed(2));
-        updateMetricLabel('morseMetricNoise', 'NOISE_REF ' + (state.lastMetrics.noise_ref || 0).toFixed(4));
+        updateMetricLabel('morseMetricNoise', 'FLOOR ' + (state.lastMetrics.noise_floor || 0).toFixed(2));
 
         var toneScope = el('morseScopeToneLabel');
         if (toneScope) {
@@ -889,6 +874,58 @@ var MorseMode = (function () {
         scopeHistory = [];
         scopeWaiting = false;
         waitingStart = 0;
+        drawIdleScope();
+    }
+
+    // Idle: what the scope will show, faintly. "CQ" keyed as a tone envelope,
+    // the threshold that separates marks from gaps, and a caption.
+    var IDLE_PATTERN = '-.-. --.-';
+
+    function drawIdleScope() {
+        var canvas = el('morseScopeCanvas');
+        if (!canvas || scopeAnim) return;
+        var rect = canvas.getBoundingClientRect();
+        if (!rect.width) return;
+        var dpr = window.devicePixelRatio || 1;
+        var w = rect.width, h = 80;
+        canvas.width = Math.max(1, Math.floor(w * dpr));
+        canvas.height = Math.max(1, Math.floor(h * dpr));
+        var ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.fillStyle = '#050510';
+        ctx.fillRect(0, 0, w, h);
+
+        // Units: dit 1, dah 3, gap 1 within a letter, 3 between letters
+        var units = [];
+        for (var i = 0; i < IDLE_PATTERN.length; i++) {
+            var c = IDLE_PATTERN[i];
+            if (c === ' ') { units.push(0, 0); continue; }
+            var len = c === '-' ? 3 : 1;
+            for (var k = 0; k < len; k++) units.push(1);
+            units.push(0);
+        }
+        var unitW = Math.min(18, (w * 0.6) / units.length);
+        var x0 = (w - unitW * units.length) / 2;
+        var threshY = h * 0.55;
+        for (var u = 0; u < units.length; u++) {
+            var on = units[u] === 1;
+            var barH = on ? h * 0.7 : h * 0.12;
+            ctx.fillStyle = on ? 'rgba(0, 255, 136, 0.22)' : 'rgba(51, 68, 85, 0.5)';
+            ctx.fillRect(x0 + u * unitW, h - barH, Math.max(unitW - 1, 1), barH);
+        }
+        ctx.strokeStyle = 'rgba(255, 68, 68, 0.35)';
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(0, threshY);
+        ctx.lineTo(w, threshY);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        ctx.fillStyle = '#556677';
+        ctx.font = '11px ' + (getComputedStyle(document.body).getPropertyValue('--font-mono') || 'monospace');
+        ctx.textAlign = 'left';
+        ctx.fillText('Idle · tone level shows here: marks above the threshold, gaps below', 10, 16);
     }
 
     function appendDiagLine(text) {
@@ -990,6 +1027,7 @@ var MorseMode = (function () {
 
         var scopePanel = el('morseScopePanel');
         if (scopePanel) scopePanel.style.display = 'block';
+        if (!running && !starting) drawIdleScope();
 
         var outputPanel = el('morseOutputPanel');
         if (outputPanel) outputPanel.style.display = 'block';
@@ -1007,7 +1045,7 @@ var MorseMode = (function () {
                 scopeStatus.style.color = '#ffaa00';
             } else {
                 scopeStatus.textContent = 'IDLE';
-                scopeStatus.style.color = '#444';
+                scopeStatus.style.color = 'var(--text-dim)';
             }
         }
 
@@ -1024,8 +1062,8 @@ var MorseMode = (function () {
         var controls = [
             'morseFrequency', 'morseGain', 'morsePPM', 'morseToneFreq', 'morseBandwidth',
             'morseAutoToneTrack', 'morseToneLock', 'morseThresholdMode', 'morseManualThreshold',
-            'morseThresholdMultiplier', 'morseThresholdOffset', 'morseSignalGate', 'morseWpmMode',
-            'morseWpm', 'morseWpmLock', 'morseShowRaw', 'morseShowDiag',
+            'morseSignalGate', 'morseWpmMode', 'morseWpm', 'morseWpmLock',
+            'morseShowRaw', 'morseShowDiag',
             'morseCalibrateBtn', 'morseDecodeFileBtn', 'morseFileInput'
         ];
 
@@ -1054,13 +1092,7 @@ var MorseMode = (function () {
     function onThresholdModeChange() {
         var mode = (el('morseThresholdMode') && el('morseThresholdMode').value) || 'auto';
         var manualRow = el('morseManualThresholdRow');
-        var autoRow = el('morseThresholdAutoRow');
-        var offsetRow = el('morseThresholdOffsetRow');
-
         if (manualRow) manualRow.style.display = mode === 'manual' ? 'block' : 'none';
-        if (autoRow) autoRow.style.display = mode === 'manual' ? 'none' : 'block';
-        if (offsetRow) offsetRow.style.display = mode === 'manual' ? 'none' : 'block';
-
         persistSettings();
     }
 
@@ -1156,8 +1188,6 @@ var MorseMode = (function () {
         formData.append('tone_lock', String(config.tone_lock));
         formData.append('threshold_mode', config.threshold_mode);
         formData.append('manual_threshold', config.manual_threshold);
-        formData.append('threshold_multiplier', config.threshold_multiplier);
-        formData.append('threshold_offset', config.threshold_offset);
         formData.append('wpm_mode', config.wpm_mode);
         formData.append('wpm_lock', String(config.wpm_lock));
         formData.append('signal_gate', config.signal_gate);

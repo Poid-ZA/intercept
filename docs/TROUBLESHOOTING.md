@@ -2,6 +2,36 @@
 
 Solutions for common issues.
 
+## Login and Access Issues
+
+### I don't know the admin password
+
+There is no default password. On first start INTERCEPT generates one, logs it, and writes it to `instance/.initial_password`:
+
+```bash
+cat instance/.initial_password
+```
+
+Log in with that, then set your own when prompted. Delete the file afterwards.
+
+### I am stuck on the "set new password" page
+
+That is intended. An account seeded with a password you did not choose must set one before the rest of the interface is reachable. It also appears if you are upgrading from a version that used the old `admin`/`admin` default.
+
+Enter the current password (the generated one, or `admin` if you are upgrading), then a new one of at least 12 characters. See [Security](SECURITY.md#authentication) for why.
+
+### I have forgotten the password entirely
+
+Set `INTERCEPT_ADMIN_PASSWORD` in your environment or `.env` and restart. On startup this overwrites the stored password for the admin account:
+
+```bash
+INTERCEPT_ADMIN_PASSWORD='a-new-password' sudo ./start.sh
+```
+
+### My remote agent stopped sending data after upgrading
+
+From v2.33.6 an agent must have an API key to push. An agent registered without one is refused by `/controller/api/ingest`. Set a key on the agent in the interface, and the matching `controller_api_key` in the agent's own config file, then restart the agent.
+
 ## Python / Installation Issues
 
 ### "ModuleNotFoundError: No module named 'flask'"
@@ -47,7 +77,7 @@ pip install --break-system-packages flask
 
 ### "TypeError: 'type' object is not subscriptable"
 
-This error occurs on Python 3.7 or 3.8. **INTERCEPT requires Python 3.9 or later.**
+This error occurs on Python 3.7 or 3.8. **INTERCEPT requires Python 3.10 or later.**
 
 ```bash
 # Check your Python version
@@ -114,7 +144,7 @@ See [HARDWARE.md — RTL-SDR Setup](HARDWARE.md#rtl-sdr-setup-linux) for udev ru
 
 ### Device busy error
 
-1. Click "Kill All Processes" in the UI
+1. Click "Stop all running processes" (the ⊗ button in the toolbar)
 2. Unplug and replug the SDR device
 3. Check for other applications: `lsof | grep rtl`
 
@@ -245,7 +275,7 @@ rtl_fm -M am -f 118000000 -s 24000 -r 24000 -g 40 2>/dev/null | \
 | Error | Cause | Solution |
 |-------|-------|----------|
 | `No supported devices found` | SDR not connected | Plug in SDR, check USB |
-| `Device or resource busy` | Another process using SDR | Click "Kill All Processes" |
+| `Device or resource busy` | Another process using SDR | Click "Stop all running processes" (⊗ in the toolbar) |
 | `401 Unauthorized` | Wrong Icecast password | Check password in Icecast config |
 | `Connection refused` | Icecast not running | Start Icecast service |
 | `Encoder libmp3lame not found` | ffmpeg missing codec | Reinstall ffmpeg with codecs |

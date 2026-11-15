@@ -21,6 +21,7 @@ import logging
 import os
 import platform
 import queue
+import re
 import subprocess
 import threading
 from pathlib import Path
@@ -40,7 +41,15 @@ from flask import (
 )
 from werkzeug.security import check_password_hash
 
-from config import CHANGELOG, DEFAULT_LATITUDE, DEFAULT_LONGITUDE, SHARED_OBSERVER_LOCATION_ENABLED, VERSION
+from config import (
+    CHANGELOG,
+    DEFAULT_LATITUDE,
+    DEFAULT_LONGITUDE,
+    SHARED_OBSERVER_LOCATION_ENABLED,
+    SSL_CERT,
+    SSL_KEY,
+    VERSION,
+)
 from utils.cleanup import DataStore, cleanup_manager
 from utils.constants import (
     MAX_AIRCRAFT_AGE_SECONDS,
@@ -54,6 +63,7 @@ from utils.constants import (
 from utils.dependencies import check_all_dependencies, check_tool
 from utils.process import cleanup_stale_dump1090, cleanup_stale_processes
 from utils.sdr import SDRFactory
+from utils.sdr.device_config import describe_devices, set_device_config
 
 try:
     from flask_limiter import Limiter
@@ -96,10 +106,21 @@ def _load_or_generate_secret_key():
     key_path.parent.mkdir(exist_ok=True)
     key = os.urandom(32).hex()
     key_path.write_text(key)
+    # Session-signing secret: readable only by the owner.
+    with contextlib.suppress(OSError):
+        key_path.chmod(0o600)
     return key
 
 
 app.secret_key = _load_or_generate_secret_key()
+
+# Session cookie hardening. SameSite=Lax is what browsers already default to,
+# but stating it means the protection is deliberate rather than inherited.
+# Secure is set only when TLS is configured, since it would otherwise stop
+# the cookie being sent at all over plain HTTP.
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+app.config["SESSION_COOKIE_SECURE"] = bool(SSL_CERT and SSL_KEY)
 
 # Set up HTTP compression (gzip/brotli for HTML, CSS, JS, JSON)
 if _has_compress:
@@ -187,6 +208,18 @@ def add_security_headers(response):
 # ============================================
 
 
+@app.url_defaults
+def version_static_urls(endpoint: str, values: dict) -> None:
+    """Every url_for('static', ...) carries ?v=<version>.
+
+    App assets are cached for a day, so without it a browser could pair a
+    new release's pages with the old release's scripts (GPS.setSkyView "is
+    not a function" after an upgrade). A new version is a new URL.
+    """
+    if endpoint == "static" and "v" not in values:
+        values["v"] = VERSION
+
+
 @app.context_processor
 def inject_offline_settings():
     """Inject offline settings into all templates."""
@@ -209,7 +242,7 @@ def inject_offline_settings():
             "enabled": get_setting("offline.enabled", False),
             "assets_source": assets_source,
             "fonts_source": fonts_source,
-            "tile_provider": get_setting("offline.tile_provider", "cartodb_dark_nolabels"),
+            "tile_provider": get_setting("offline.tile_provider", "esri_world"),
             "tile_server_url": get_setting("offline.tile_server_url", ""),
         }
     }
@@ -445,15 +478,17 @@ def require_login():
         return None
 
     # Routes that don't require login (to avoid infinite redirect loop)
-    allowed_routes = ["login", "static", "favicon", "health", "health_check"]
+    allowed_routes = ["login", "static", "favicon", "health", "health_check", "change_password"]
 
-    # Allow audio streaming endpoints without session auth
-    if request.path.startswith("/listening/audio/"):
-        return None
-
-    # Allow WebSocket upgrade requests (page load already required auth)
+    # A WebSocket upgrade is an ordinary HTTP request until the handshake
+    # completes, so the session is checkable here. It used to be allowed
+    # through on the assumption that a page load had already authenticated
+    # the client, but a WebSocket client need not load a page, and these
+    # endpoints carry live RF data.
     if request.path.startswith("/ws/"):
-        return None
+        if "logged_in" in session:
+            return None
+        return Response("Authentication required", status=401)
 
     # Controller API endpoints use API key auth, not session auth
     # Allow agent push/pull endpoints without session login
@@ -464,10 +499,60 @@ def require_login():
     if "logged_in" not in session and request.endpoint not in allowed_routes:
         return redirect(url_for("login"))
 
+    # An account seeded with a password the operator did not choose must set
+    # one before anything else is reachable. The flag is cleared by
+    # set_user_password(), so this resolves as soon as the change is made.
+    if session.get("must_change_password") and request.endpoint not in allowed_routes:
+        if request.path.startswith("/api/") or request.is_json:
+            return jsonify({"status": "error", "message": "Password change required"}), 403
+        return redirect(url_for("change_password"))
+
+
+@app.route("/change-password", methods=["GET", "POST"])
+@limiter.limit("10 per minute")
+def change_password() -> Response | str:
+    """Set a new password.
+
+    Reachable only when logged in. Required before anything else when the
+    account was seeded with a password the operator did not choose.
+    """
+    if "logged_in" not in session:
+        return redirect(url_for("login"))
+
+    username = session.get("username")
+    forced = bool(session.get("must_change_password"))
+
+    if request.method == "POST":
+        from utils.database import set_user_password, verify_user_password
+
+        current = request.form.get("current_password") or ""
+        new = request.form.get("new_password") or ""
+        confirm = request.form.get("confirm_password") or ""
+
+        error = None
+        if not verify_user_password(username, current):
+            error = "Current password is incorrect"
+        elif len(new) < 12:
+            error = "New password must be at least 12 characters"
+        elif new != confirm:
+            error = "New passwords do not match"
+        elif new == current:
+            error = "New password must differ from the current one"
+
+        if error:
+            flash(error, "error")
+        else:
+            set_user_password(username, new)
+            session.pop("must_change_password", None)
+            logger.info(f"Password changed for user '{username}'.")
+            return redirect(url_for("index"))
+
+    return render_template("change_password.html", version=VERSION, forced=forced, username=username)
+
 
 @app.route("/logout")
 def logout():
-    session.pop("logged_in", None)
+    session.clear()
     return redirect(url_for("login"))
 
 
@@ -490,6 +575,14 @@ def login():
             session["username"] = username
             session["role"] = user["role"]
 
+            from utils.database import user_must_change_password
+
+            if user_must_change_password(username):
+                session["must_change_password"] = True
+                logger.info(f"User '{username}' logged in; password change required.")
+                return redirect(url_for("change_password"))
+
+            session.pop("must_change_password", None)
             logger.info(f"User '{username}' logged in successfully.")
             return redirect(url_for("index"))
         else:
@@ -510,7 +603,7 @@ def index() -> str:
         "rtl_433": check_tool("rtl_433"),
         "rtlamr": check_tool("rtlamr"),
     }
-    devices = [d.to_dict() for d in SDRFactory.detect_devices()]
+    devices = describe_devices(SDRFactory.detect_devices())
     return render_template(
         "index.html",
         tools=tools,
@@ -543,8 +636,82 @@ def pwa_manifest() -> Response:
 @app.route("/devices")
 def get_devices() -> Response:
     """Get all detected SDR devices with hardware type info."""
-    devices = SDRFactory.detect_devices()
-    return jsonify([d.to_dict() for d in devices])
+    return jsonify(describe_devices(SDRFactory.detect_devices()))
+
+
+_NOTE_PROTOCOLS = {"bluetooth", "wifi", "rf", "adsb", "ais", "dsc", "aprs", "meshtastic", "meshcore", "other"}
+_NOTE_IDENTIFIER = re.compile(r"^[A-Za-z0-9:._!-]{1,64}$")
+
+
+def _clean_note(notes) -> str | None:
+    if notes is None:
+        return None
+    if not isinstance(notes, str):
+        raise ValueError("notes must be text")
+    notes = notes.strip()
+    if len(notes) > 2000:
+        raise ValueError("notes must be at most 2000 characters")
+    if any(ord(c) < 32 and c not in "\n\t" for c in notes):
+        raise ValueError("notes must not contain control characters")
+    return notes or None
+
+
+def _clean_tags(tags) -> list[str]:
+    if tags is None:
+        return []
+    if not isinstance(tags, list) or len(tags) > 10:
+        raise ValueError("tags must be a list of at most 10")
+    cleaned = []
+    for tag in tags:
+        if not isinstance(tag, str) or not re.fullmatch(r"[\w .-]{1,32}", tag.strip()):
+            raise ValueError("each tag must be 1-32 letters, digits, spaces, dots or dashes")
+        if tag.strip() not in cleaned:
+            cleaned.append(tag.strip())
+    return cleaned
+
+
+@app.route("/device-notes")
+def list_device_notes() -> Response:
+    """Every device an operator has noted or tagged, by identifier."""
+    from utils.database import get_device_annotations
+
+    return jsonify({"status": "success", "devices": get_device_annotations()})
+
+
+@app.route("/device-notes/<identifier>", methods=["PUT", "DELETE"])
+@(csrf.exempt if csrf else lambda f: f)  # fetch() JSON API, like the blueprints
+def update_device_notes(identifier: str) -> Response:
+    """Set or clear an operator's note and tags on an observed device.
+
+    Shown wherever the device appears. A note does not make a device
+    known-good; that stays a separate, deliberate step.
+    """
+    from utils.database import set_device_annotation
+
+    if not _NOTE_IDENTIFIER.match(identifier):
+        return jsonify({"status": "error", "message": "Invalid device identifier"}), 400
+    data = {} if request.method == "DELETE" else (request.get_json(silent=True) or {})
+    protocol = data.get("protocol") or "other"
+    if protocol not in _NOTE_PROTOCOLS:
+        return jsonify({"status": "error", "message": "Unknown protocol"}), 400
+    try:
+        notes = _clean_note(data.get("notes"))
+        tags = _clean_tags(data.get("tags"))
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    return jsonify({"status": "success", "device": set_device_annotation(identifier, protocol, notes, tags)})
+
+
+@app.route("/devices/config/<key>", methods=["PUT", "DELETE"])
+@(csrf.exempt if csrf else lambda f: f)  # fetch() JSON API, like the blueprints
+def update_device_config(key: str) -> Response:
+    """Set or clear a device's display name, PPM, default gain and bias-T."""
+    try:
+        data = {} if request.method == "DELETE" else request.get_json(silent=True)
+        config = set_device_config(key, data)
+    except ValueError as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+    return jsonify({"status": "success", "key": key, "config": config})
 
 
 @app.route("/devices/status")
@@ -554,8 +721,7 @@ def get_devices_status() -> Response:
     registry = get_sdr_device_status()
 
     result = []
-    for device in devices:
-        d = device.to_dict()
+    for device, d in zip(devices, describe_devices(devices)):
         key = f"{device.sdr_type.value}:{device.index}"
         d["in_use"] = key in registry
         d["used_by"] = registry.get(key)
@@ -665,21 +831,41 @@ def get_devices_debug() -> Response:
     return jsonify(diagnostics)
 
 
+@app.route("/settings/theme", methods=["GET", "POST"])
+def theme_setting() -> Response:
+    """Read or save the UI theme, so it can sync across devices.
+
+    The page also keeps the theme in localStorage for an instant, flash-free
+    load; this is the shared copy it reconciles against.
+    """
+    from utils.database import get_setting, set_setting
+
+    if request.method == "POST":
+        data = request.get_json(silent=True) or {}
+        value = data.get("value") or data.get("theme")
+        if value not in ("dark", "light"):
+            return jsonify({"status": "error", "message": "theme must be 'dark' or 'light'"}), 400
+        set_setting("ui.theme", value)
+        return jsonify({"status": "success", "value": value})
+
+    return jsonify({"status": "success", "value": get_setting("ui.theme", None)})
+
+
 @app.route("/dependencies")
 def get_dependencies() -> Response:
     """Get status of all tool dependencies."""
+    from utils.dependencies import install_hints, package_manager
+
     results = check_all_dependencies()
-
-    # Determine OS for install instructions
-    system = platform.system().lower()
-    if system == "darwin":
-        pkg_manager = "brew"
-    elif system == "linux":
-        pkg_manager = "apt"
-    else:
-        pkg_manager = "manual"
-
-    return jsonify({"status": "success", "os": system, "pkg_manager": pkg_manager, "modes": results})
+    return jsonify(
+        {
+            "status": "success",
+            "os": platform.system().lower(),
+            "pkg_manager": package_manager(),
+            "install_hints": install_hints(),
+            "modes": results,
+        }
+    )
 
 
 @app.route("/export/aircraft", methods=["GET"])
@@ -715,7 +901,7 @@ def export_aircraft() -> Response:
         return response
     else:
         return jsonify(
-            {"timestamp": __import__("datetime").datetime.utcnow().isoformat(), "aircraft": adsb_aircraft.values()}
+            {"timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(tzinfo=None).isoformat(), "aircraft": adsb_aircraft.values()}
         )
 
 
@@ -750,7 +936,7 @@ def export_wifi() -> Response:
     else:
         return jsonify(
             {
-                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(tzinfo=None).isoformat(),
                 "networks": wifi_networks.values(),
                 "clients": wifi_clients.values(),
             }
@@ -788,7 +974,7 @@ def export_bluetooth() -> Response:
     else:
         return jsonify(
             {
-                "timestamp": __import__("datetime").datetime.utcnow().isoformat(),
+                "timestamp": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).replace(tzinfo=None).isoformat(),
                 "devices": bt_devices.values(),
                 "beacons": bt_beacons.values(),
             }
@@ -887,6 +1073,68 @@ def _get_wifi_health() -> tuple[bool, int, int]:
     )
 
 
+# Each mode's start and stop routes, so the live views can say how long a
+# decoder has run or why it failed to start. Keys match /health "processes".
+_MODE_LIFECYCLE_PATHS: dict[str, tuple[str, str]] = {
+    path: (mode, action)
+    for mode, start, stop in (
+        ("pager", "/start", "/stop"),
+        ("sensor", "/start_sensor", "/stop_sensor"),
+        ("rtlamr", "/start_rtlamr", "/stop_rtlamr"),
+        ("adsb", "/adsb/start", "/adsb/stop"),
+        ("ais", "/ais/start", "/ais/stop"),
+        ("acars", "/acars/start", "/acars/stop"),
+        ("vdl2", "/vdl2/start", "/vdl2/stop"),
+        ("aprs", "/aprs/start", "/aprs/stop"),
+        ("dsc", "/dsc/start", "/dsc/stop"),
+        ("radiosonde", "/radiosonde/start", "/radiosonde/stop"),
+        ("morse", "/morse/start", "/morse/stop"),
+        ("ook", "/ook/start", "/ook/stop"),
+        ("sstv", "/sstv/start", "/sstv/stop"),
+        ("sstv_general", "/sstv-general/start", "/sstv-general/stop"),
+        ("weathersat", "/weather-sat/start", "/weather-sat/stop"),
+        ("wefax", "/wefax/start", "/wefax/stop"),
+        ("wifi", "/wifi/v2/scan/start", "/wifi/v2/scan/stop"),
+        ("bluetooth", "/api/bluetooth/scan/start", "/api/bluetooth/scan/stop"),
+        ("meshtastic", "/meshtastic/start", "/meshtastic/stop"),
+        ("drone", "/drone/start", "/drone/stop"),
+    )
+    for path, action in ((start, "start"), (stop, "stop"))
+}
+_mode_lifecycle: dict[str, dict] = {}
+
+
+@app.after_request
+def _record_mode_lifecycle(response: Response) -> Response:
+    """Remember when each mode last started, and why its last start failed."""
+    if request.method != "POST":
+        return response
+    entry = _MODE_LIFECYCLE_PATHS.get(request.path)
+    if not entry:
+        return response
+    mode, action = entry
+    state = _mode_lifecycle.setdefault(mode, {"started_at": None, "error": None})
+    if action == "stop":
+        state["started_at"] = None
+    elif response.status_code < 400:
+        state.update(started_at=_time.time(), error=None)
+    else:
+        # An "already running" refusal must not erase the running start's time.
+        data = response.get_json(silent=True) if response.is_json else None
+        message = (data or {}).get("message") or f"HTTP {response.status_code}"
+        state["error"] = {"message": str(message)[:300], "at": _time.time()}
+    return response
+
+
+def _get_drone_running() -> bool:
+    try:
+        from routes import drone
+
+        return bool(drone._drone_running)
+    except Exception:
+        return False
+
+
 @app.route("/health")
 def health_check() -> Response:
     """Health check endpoint for monitoring."""
@@ -956,7 +1204,10 @@ def health_check() -> Response:
                 "tscm": _get_tscm_active(),
                 "gps": _get_singleton_running("utils.gps", "get_gps_reader", "is_running"),
                 "bt_locate": _get_singleton_running("utils.bt_locate", "get_locate_session", "is_active"),
+                "ook": ook_process is not None and (ook_process.poll() is None if ook_process else False),
+                "drone": _get_drone_running(),
             },
+            "lifecycle": _mode_lifecycle,
             "data": {
                 "aircraft_count": len(adsb_aircraft),
                 "vessel_count": len(ais_vessels),
@@ -986,6 +1237,9 @@ def kill_all() -> Response:
     from utils.bluetooth import reset_bluetooth_scanner
 
     killed = []
+    # Exact process names (pkill -x), not substrings of any command line: as
+    # a root service, "pkill -f ffmpeg" would also kill unrelated programs of
+    # every user whose arguments merely mention one of these names.
     processes_to_kill = [
         "rtl_fm",
         "multimon-ng",
@@ -994,6 +1248,9 @@ def kill_all() -> Response:
         "aireplay-ng",
         "airmon-ng",
         "dump1090",
+        "dump1090-fa",
+        "dump1090-mutabi",  # dump1090-mutability: the kernel keeps 15 characters
+        "readsb",  # ADS-B on HackRF/SoapySDR devices
         "acarsdec",
         "dumpvdl2",
         "direwolf",
@@ -1007,14 +1264,20 @@ def kill_all() -> Response:
         "ffmpeg",
         "hackrf_transfer",
         "hackrf_sweep",
-        "auto_rx",
+        "rx_sdr",  # HackRF I/Q source of the csdr demod pipeline
+        "csdr",
     ]
+    # Python helpers run as "python <script>", so match their script filename
+    scripts_to_kill = ["auto_rx.py", "rtltcp_iq.py"]
+    # Only processes owned by this service's user
+    owner = ["-U", str(os.geteuid())]
 
-    for proc in processes_to_kill:
+    targets = [["-x", name] for name in processes_to_kill] + [["-f", script] for script in scripts_to_kill]
+    for match in targets:
         try:
-            result = subprocess.run(["pkill", "-f", proc], capture_output=True)
+            result = subprocess.run(["pkill", *owner, *match], capture_output=True)
             if result.returncode == 0:
-                killed.append(proc)
+                killed.append(match[1])
         except (subprocess.SubprocessError, OSError):
             pass
 
@@ -1062,6 +1325,8 @@ def kill_all() -> Response:
             cleanup_ook(emit_status=False)
         except Exception:
             if ook_process:
+                from utils.process import safe_terminate, unregister_process
+
                 safe_terminate(ook_process)
                 unregister_process(ook_process)
             ook_process = None
@@ -1157,6 +1422,48 @@ def _ensure_self_signed_cert(cert_dir: str) -> tuple:
 _app_initialized = False
 
 
+def _register_event_pipelines() -> None:
+    """Send each mode's decoded events through the event pipeline (alerts,
+    recording, MQTT, the activity feed) once per event.
+
+    They used to be processed by each browser's SSE stream: once per open
+    tab, and not at all with none. The fan-out distributor takes every
+    message from these queues exactly once, so the pipeline runs there, and
+    registering starts it now rather than when a browser first connects.
+    Channel keys must match the ones the stream routes subscribe with.
+    """
+    import routes.listening_post as listening_post
+    from routes.sstv import _sstv_queue
+    from routes.sstv_general import _sstv_general_queue
+    from utils.event_pipeline import ingest_hook
+    from utils.sse import register_ingest
+
+    channels = {
+        # channel key: (source queue, pipeline mode)
+        "pager": (output_queue, "pager"),
+        "sensor": (sensor_queue, "sensor"),
+        "rtlamr": (rtlamr_queue, "rtlamr"),
+        "wifi": (wifi_queue, "wifi"),
+        "bluetooth": (bt_queue, "bluetooth"),
+        "acars": (acars_queue, "acars"),
+        "vdl2": (vdl2_queue, "vdl2"),
+        "aprs": (aprs_queue, "aprs"),
+        "ais": (ais_queue, "ais"),
+        "dsc": (dsc_queue, "dsc"),
+        "ook": (ook_queue, "ook"),
+        "morse": (morse_queue, "morse"),
+        "tscm": (tscm_queue, "tscm"),
+        "radiosonde": (radiosonde_queue, "radiosonde"),
+        "drone": (drone_queue, "drone"),
+        "sstv": (_sstv_queue, "sstv"),
+        "sstv_general": (_sstv_general_queue, "sstv_general"),
+        "receiver_scanner": (listening_post.scanner_queue, "receiver_scanner"),
+        "receiver_waterfall": (listening_post.waterfall_queue, "waterfall"),
+    }
+    for channel_key, (source_queue, mode) in channels.items():
+        register_ingest(source_queue, channel_key, ingest_hook(mode))
+
+
 def _init_app() -> None:
     """Initialize blueprints, database, and websockets.
 
@@ -1184,6 +1491,9 @@ def _init_app() -> None:
     from routes import register_blueprints
 
     register_blueprints(app)
+
+    # Every decoded event through the pipeline once, with or without a page open
+    _register_event_pipelines()
 
     # Initialize WebSocket for audio streaming
     try:
@@ -1245,6 +1555,7 @@ def _init_app() -> None:
         try:
             from utils.database import (
                 cleanup_old_dsc_alerts,
+                cleanup_old_meshtastic_messages,
                 cleanup_old_payloads,
                 cleanup_old_signal_history,
                 cleanup_old_timeline_entries,
@@ -1253,7 +1564,12 @@ def _init_app() -> None:
             cleanup_manager.register_db_cleanup(cleanup_old_signal_history, interval_multiplier=1440)
             cleanup_manager.register_db_cleanup(cleanup_old_timeline_entries, interval_multiplier=1440)
             cleanup_manager.register_db_cleanup(cleanup_old_dsc_alerts, interval_multiplier=1440)
+            cleanup_manager.register_db_cleanup(cleanup_old_meshtastic_messages, interval_multiplier=1440)
             cleanup_manager.register_db_cleanup(cleanup_old_payloads, interval_multiplier=1440)
+            # Observations are the busiest table: every 10 minutes, not daily.
+            from utils.observations import cleanup_old_observations
+
+            cleanup_manager.register_db_cleanup(cleanup_old_observations, interval_multiplier=10)
             cleanup_manager.start()
         except Exception as e:
             logger.warning(f"Cleanup manager init failed: {e}")

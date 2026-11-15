@@ -22,11 +22,14 @@ def register_blueprints(app):
     from .dsc import dsc_bp
     from .gps import gps_bp
     from .ground_station import ground_station_bp
+    from .identity_management import identity_bp
     from .listening_post import receiver_bp
     from .meshcore import meshcore_bp
     from .meshtastic import meshtastic_bp
+    from .messages import messages_bp
     from .meteor_websocket import meteor_bp
     from .morse import morse_bp
+    from .observations import observations_bp
     from .offline import offline_bp
     from .ook import ook_bp
     from .pager import pager_bp
@@ -92,11 +95,22 @@ def register_blueprints(app):
     app.register_blueprint(morse_bp)  # CW/Morse code decoder
     app.register_blueprint(radiosonde_bp)  # Radiosonde weather balloon tracking
     app.register_blueprint(system_bp)  # System health monitoring
+    app.register_blueprint(identity_bp)  # Identity management / user accounts
     app.register_blueprint(ook_bp)  # Generic OOK signal decoder
     app.register_blueprint(ground_station_bp)  # Ground station automation
     app.register_blueprint(drone_bp)  # Drone intelligence / UAV detection
+    app.register_blueprint(observations_bp)  # Activity feed across modes
+    app.register_blueprint(messages_bp)  # Decoded-message database
 
-    # Exempt all API blueprints from CSRF (they use JSON, not form tokens)
+    # Every blueprint here is a JSON API driven by fetch(), so none carries a
+    # CSRF form token and all are exempt. The exemption is blanket on purpose:
+    # an explicit allow-list of 40+ names would break a new blueprint that
+    # someone forgot to add, without protecting anything extra.
+    #
+    # The actual CSRF protection is the session cookie's SameSite=Lax setting
+    # (app.py), which stops the cookie being sent on a cross-site POST at all.
+    # If a future blueprint serves HTML forms, protect it individually rather
+    # than relying on this loop.
     if _csrf:
         for bp in app.blueprints.values():
             _csrf.exempt(bp)

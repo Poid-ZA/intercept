@@ -8,7 +8,7 @@
     justify-content: center;
     padding: 8px;
     border-radius: 6px;
-    background: rgba(0,0,0,0.3);
+    background: var(--surface-sunken);
     border: 1px solid var(--border-color);
 }
 .threat-card .count {
@@ -41,18 +41,93 @@
 }
 .tscm-threat-banner {
     display: flex;
-    gap: 12px;
-    padding: 12px;
-    background: rgba(0,0,0,0.3);
+    align-items: center;
+    gap: 16px;
+    padding: 12px 16px;
+    background: var(--surface-sunken);
+    border: 1px solid var(--border-color);
     border-radius: 8px;
-    flex-wrap: wrap;
+}
+
+/* Overall threat level: a half dial (renderTscmThreatGauge in index.html) */
+.tscm-gauge {
+    flex: 0 0 150px;
+    text-align: center;
+    --level: var(--text-dim);
+}
+.tscm-gauge.low { --level: var(--severity-low); }
+.tscm-gauge.elevated { --level: var(--severity-high); }
+.tscm-gauge.high { --level: var(--severity-critical); }
+.tscm-gauge svg {
+    width: 130px;
+    height: 70px;
+    display: block;
+    margin: 0 auto;
+    overflow: visible;
+}
+.tscm-gauge path {
+    fill: none;
+    stroke-width: 8;
+}
+.tscm-gauge .zone { stroke-opacity: 0.18; }
+.tscm-gauge .zone.low { stroke: var(--severity-low); }
+.tscm-gauge .zone.elevated { stroke: var(--severity-high); }
+.tscm-gauge .zone.high { stroke: var(--severity-critical); }
+.tscm-gauge .fill {
+    stroke: var(--level);
+    stroke-linecap: round;
+    filter: drop-shadow(0 0 3px var(--level));
+}
+.tscm-gauge .needle {
+    stroke: var(--text-primary);
+    stroke-width: 2;
+    stroke-linecap: round;
+}
+.tscm-gauge .hub { fill: var(--text-primary); }
+.tscm-gauge-level {
+    margin-top: 2px;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--level);
+}
+.tscm-gauge-sub {
+    font-size: 10px;
+    color: var(--text-dim);
+}
+
+/* The counts beside it: neutral tiles, the colour on the count and edge */
+.tscm-threat-cards {
+    flex: 1;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 8px;
 }
 .tscm-threat-banner .threat-card {
-    flex: 1;
-    padding: 12px;
+    align-items: flex-start;
+    padding: 10px 12px;
+    border: 1px solid var(--border-color);
+    border-left: 3px solid currentColor;
+    background: var(--bg-card, rgba(0,0,0,0.2));
+    cursor: pointer;
 }
+.tscm-threat-banner .threat-card:hover { border-color: currentColor; }
 .tscm-threat-banner .threat-card .count {
-    font-size: 24px;
+    font-size: 22px;
+    font-family: var(--font-data);
+}
+.tscm-threat-banner .threat-card .label {
+    color: var(--text-secondary);
+    opacity: 1;
+    letter-spacing: 0.06em;
+}
+.tscm-threat-banner .threat-card:not(.active) .count { color: var(--text-dim); }
+.tscm-threat-banner .threat-card:not(.active) { border-left-color: var(--border-color); }
+.tscm-threat-banner .threat-card.active { background: color-mix(in srgb, currentColor 10%, var(--bg-card, transparent)); }
+
+@media (max-width: 900px) {
+    .tscm-threat-banner { flex-direction: column; align-items: stretch; }
 }
 .tscm-main-grid {
     display: grid;
@@ -60,7 +135,7 @@
     gap: 16px;
 }
 .tscm-panel {
-    background: rgba(0,0,0,0.3);
+    background: var(--surface-sunken);
     border: 1px solid var(--border-color);
     border-radius: 8px;
     display: flex;
@@ -71,7 +146,7 @@
 }
 .tscm-panel-header {
     padding: 10px 12px;
-    background: rgba(0,0,0,0.3);
+    background: var(--surface-sunken);
     border-bottom: 1px solid var(--border-color);
     font-weight: 600;
     font-size: 12px;
@@ -96,7 +171,7 @@
     padding: 8px 10px;
     border-radius: 4px;
     margin-bottom: 6px;
-    background: rgba(0,0,0,0.2);
+    background: var(--surface-sunken-soft);
     border-left: 3px solid var(--border-color);
     cursor: pointer;
     transition: background 0.2s;
@@ -166,7 +241,7 @@
     font-family: var(--font-mono);
     font-size: 10px;
     color: var(--accent-cyan);
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--surface-sunken);
     padding: 4px 8px;
     border-radius: 3px;
 }
@@ -339,7 +414,7 @@
 .correlation-item {
     padding: 8px;
     margin-bottom: 6px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     font-size: 11px;
 }
@@ -358,7 +433,7 @@
     flex: 1;
     min-width: 100px;
     padding: 12px;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--surface-sunken);
     border-radius: 6px;
     text-align: center;
 }
@@ -400,7 +475,7 @@
     color: var(--text-muted);
     font-style: italic;
     padding: 8px 12px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     margin-top: 8px;
 }
@@ -538,7 +613,7 @@
     margin-left: 6px;
     font-size: 10px;
     color: var(--text-muted);
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
 }
 .tscm-more-hint {
     margin-top: 6px;
@@ -554,7 +629,7 @@
     display: flex;
     gap: 10px;
     padding: 8px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     font-size: 11px;
 }
@@ -658,7 +733,7 @@
 }
 .correlation-detail-item {
     padding: 12px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 6px;
     margin-bottom: 8px;
 }
@@ -670,7 +745,7 @@
 .tscm-threat-item {
     padding: 10px 12px;
     border-radius: 6px;
-    background: rgba(0,0,0,0.2);
+    background: var(--surface-sunken-soft);
     border: 1px solid;
 }
 .tscm-threat-item.critical { border-color: var(--severity-critical); background: rgba(255,51,102,0.1); }
@@ -875,7 +950,7 @@
     gap: 16px;
     padding: 8px 12px;
     margin-bottom: 12px;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--surface-sunken);
     border: 1px solid var(--border-color);
     border-radius: 6px;
     font-size: 11px;
@@ -926,7 +1001,7 @@
     gap: 8px;
     padding: 6px 12px;
     margin-bottom: 12px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     font-size: 11px;
 }
@@ -969,7 +1044,7 @@
     gap: 8px;
     padding: 8px 12px;
     margin-bottom: 12px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     align-items: flex-end;
 }
@@ -985,7 +1060,7 @@
     letter-spacing: 0.6px;
 }
 .tscm-filter-group select {
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--bg-primary);
     color: var(--text-primary);
     border: 1px solid var(--border-color);
     border-radius: 4px;
@@ -1033,7 +1108,7 @@
 .cap-detail-item {
     padding: 10px;
     margin-bottom: 8px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     border-left: 3px solid var(--border-color);
 }
@@ -1071,7 +1146,7 @@
 .known-device-item {
     padding: 10px;
     margin-bottom: 6px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 4px;
     border-left: 3px solid var(--accent-green);
     display: flex;
@@ -1088,7 +1163,7 @@
 .known-device-id {
     font-size: 10px;
     color: var(--text-muted);
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
 }
 .known-device-actions {
     display: flex;
@@ -1113,7 +1188,7 @@
 .case-item {
     padding: 12px;
     margin-bottom: 8px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 6px;
     border-left: 3px solid var(--primary-color);
     cursor: pointer;
@@ -1154,7 +1229,7 @@
 .playbook-item {
     padding: 12px;
     margin-bottom: 8px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 6px;
     border-left: 3px solid var(--severity-high);
 }
@@ -1188,7 +1263,7 @@
 .playbook-step {
     padding: 6px 8px;
     margin-bottom: 4px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 3px;
 }
 .playbook-step-num {
@@ -1200,7 +1275,7 @@
 /* Timeline Styles */
 .timeline-container {
     padding: 12px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border-radius: 6px;
 }
 .timeline-header {
@@ -1221,7 +1296,7 @@
 }
 .timeline-metric {
     padding: 8px;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--surface-sunken);
     border-radius: 4px;
     text-align: center;
 }
@@ -1237,7 +1312,7 @@
 }
 .timeline-chart {
     height: 60px;
-    background: rgba(0, 0, 0, 0.3);
+    background: var(--surface-sunken);
     border-radius: 4px;
     position: relative;
     overflow: hidden;
@@ -1627,7 +1702,7 @@
 .tscm-schedule-item {
     padding: 10px;
     border-radius: 6px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border: 1px solid var(--border-color);
 }
 .tscm-schedule-item.enabled {
@@ -1667,7 +1742,7 @@
 }
 .tscm-summary-item {
     padding: 8px 10px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border: 1px solid var(--border-color);
     border-radius: 6px;
 }
@@ -1690,7 +1765,7 @@
 }
 .tscm-case-note {
     padding: 8px 10px;
-    background: rgba(0, 0, 0, 0.2);
+    background: var(--surface-sunken-soft);
     border: 1px solid var(--border-color);
     border-radius: 6px;
 }

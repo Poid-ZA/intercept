@@ -12,8 +12,11 @@ from __future__ import annotations
 
 import queue
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, render_template, request
 
+from config import DEFAULT_LATITUDE, DEFAULT_LONGITUDE, SHARED_OBSERVER_LOCATION_ENABLED
+from utils.database import get_meshtastic_messages, store_meshtastic_message
+from utils.event_pipeline import submit
 from utils.logging import get_logger
 from utils.meshtastic import (
     MeshtasticMessage,
@@ -41,6 +44,18 @@ def _message_callback(msg: MeshtasticMessage) -> None:
     """Callback to queue messages for SSE stream."""
     msg_dict = msg.to_dict()
 
+    # Persist, so history survives reconnects and restarts. A packet already
+    # stored (mesh rebroadcast, Store & Forward replay) is not shown twice.
+    try:
+        if not store_meshtastic_message(msg_dict):
+            return
+    except Exception as e:
+        logger.warning(f"Could not store Meshtastic message: {e}")
+
+    # Alerts, watchlists and the message store, after the duplicate check so
+    # a rebroadcast or replayed packet does not alert twice
+    submit("meshtastic", msg_dict, "message")
+
     # Add to history
     _recent_messages.append(msg_dict)
     if len(_recent_messages) > MAX_HISTORY:
@@ -55,6 +70,19 @@ def _message_callback(msg: MeshtasticMessage) -> None:
             _mesh_queue.put_nowait(msg_dict)
         except queue.Empty:
             pass
+
+
+@meshtastic_bp.route("/dashboard")
+def meshtastic_dashboard() -> Response:
+    """Popout Meshtastic mesh console dashboard."""
+    embedded = request.args.get("embedded", "false") == "true"
+    return render_template(
+        "meshtastic_dashboard.html",
+        shared_observer_location=SHARED_OBSERVER_LOCATION_ENABLED,
+        default_latitude=DEFAULT_LATITUDE,
+        default_longitude=DEFAULT_LONGITUDE,
+        embedded=embedded,
+    )
 
 
 @meshtastic_bp.route("/ports")
@@ -210,7 +238,7 @@ def start_mesh():
         client = get_meshtastic_client()
         return jsonify(
             {"status": "error", "message": client.error if client else "Failed to connect to Meshtastic device"}
-        ), 500
+        ), 503
 
 
 @meshtastic_bp.route("/stop", methods=["POST"])
@@ -320,7 +348,8 @@ def send_message():
         {
             "text": "Hello mesh!",      // Required: message text (max 237 chars)
             "channel": 0,               // Optional: channel index (default 0)
-            "to": "!a1b2c3d4"          // Optional: destination node (default broadcast)
+            "to": "!a1b2c3d4",         // Optional: destination node (default broadcast)
+            "reply_id": 123456789      // Optional: packet_id of the message being replied to
         }
 
     Returns:
@@ -349,8 +378,12 @@ def send_message():
 
     destination = data.get("to")
 
+    reply_id = data.get("reply_id")
+    if reply_id is not None and (not isinstance(reply_id, int) or isinstance(reply_id, bool) or reply_id <= 0):
+        return jsonify({"status": "error", "message": "reply_id must be a packet ID"}), 400
+
     logger.info(f"Sending message: text='{text[:50]}...', channel={channel}, to={destination}")
-    success, error = client.send_text(text, channel=channel, destination=destination)
+    success, error = client.send_text(text, channel=channel, destination=destination, reply_id=reply_id)
     logger.info(f"Send result: success={success}, error={error}")
 
     if success:
@@ -362,29 +395,30 @@ def send_message():
 @meshtastic_bp.route("/messages")
 def get_messages():
     """
-    Get recent message history.
+    Get message history.
 
-    Returns the most recent messages received since the listener was started.
-    Limited to the last 500 messages.
+    Returns the most recent stored messages, including those received in
+    earlier sessions. Limited to the last 500 messages.
 
     Query parameters:
-        limit: Maximum number of messages to return (default: all)
+        limit: Maximum number of messages to return (default: 500)
         channel: Filter by channel index (optional)
 
     Returns:
-        JSON with message list.
+        JSON with message list, oldest first.
     """
     limit = request.args.get("limit", type=int)
     channel = request.args.get("channel", type=int)
+    limit = min(limit, MAX_HISTORY) if limit and limit > 0 else MAX_HISTORY
 
-    messages = _recent_messages.copy()
-
-    # Filter by channel if specified
-    if channel is not None:
-        messages = [m for m in messages if m.get("channel") == channel]
-
-    # Apply limit
-    if limit and limit > 0:
+    try:
+        messages = get_meshtastic_messages(limit=limit, channel=channel)
+    except Exception as e:
+        # Database unavailable: fall back to what this session has received
+        logger.warning(f"Could not read stored Meshtastic messages: {e}")
+        messages = _recent_messages.copy()
+        if channel is not None:
+            messages = [m for m in messages if m.get("channel") == channel]
         messages = messages[-limit:]
 
     return jsonify({"status": "ok", "messages": messages, "count": len(messages)})
@@ -480,6 +514,28 @@ def get_nodes():
             "with_position_count": sum(1 for n in nodes_list if n.get("has_position")),
         }
     )
+
+
+@meshtastic_bp.route("/nodes/<node_id>/<action>", methods=["POST"])
+def manage_node(node_id: str, action: str):
+    """
+    Change a node in the connected device's NodeDB.
+
+    Actions: favorite, unfavorite, ignore, unignore, remove.
+
+    Returns:
+        JSON with the action's status.
+    """
+    client = get_meshtastic_client()
+
+    if not client or not client.is_running:
+        return jsonify({"status": "error", "message": "Not connected to Meshtastic device"}), 400
+
+    success, error = client.manage_node(node_id, action)
+
+    if success:
+        return jsonify({"status": "ok", "node_id": node_id, "action": action})
+    return jsonify({"status": "error", "message": error or f"Failed to {action} node"}), 400
 
 
 @meshtastic_bp.route("/traceroute", methods=["POST"])

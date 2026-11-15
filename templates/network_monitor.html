@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en" class="{% if offline_settings.tile_provider in ['cartodb_dark', 'cartodb_dark_cyan'] %}map-cyber-enabled{% endif %}">
 <head>
+    <script src="{{ url_for('static', filename='js/core/visible-interval.js') }}"></script>
     <script>(function(){var t=localStorage.getItem('intercept-ui-tier')||'enhanced';document.documentElement.setAttribute('data-ui-tier',t);})();</script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -14,7 +15,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/agents.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}&r=maptheme17">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -103,8 +104,9 @@
 
         .status-bar {
             display: flex;
+            flex-wrap: wrap;  /* four readouts do not fit a phone's width */
             align-items: center;
-            gap: 20px;
+            gap: 6px 20px;
             padding: 10px 20px;
             background: var(--bg-tertiary);
             border-bottom: 1px solid var(--border-color);
@@ -325,6 +327,10 @@
         .empty-state-text {
             font-size: 13px;
             margin-bottom: 10px;
+        }
+
+        .empty-state-hint a {
+            color: var(--accent-cyan);
         }
 
         .empty-state-hint {
@@ -1136,11 +1142,11 @@
     <!-- Help Modal -->
     {% include 'partials/help-modal.html' %}
 
-    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}?v={{ version }}&r=voicefix2"></script>
+    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/keyboard-shortcuts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/cheat-sheets.js') }}"></script>
     {% include 'partials/nav-utility-modals.html' %}
-    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}&r=maptheme17"></script>
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/global-nav.js') }}"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {

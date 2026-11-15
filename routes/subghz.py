@@ -31,6 +31,15 @@ logger = get_logger("intercept.subghz")
 
 subghz_bp = Blueprint("subghz", __name__, url_prefix="/subghz")
 
+
+def _start_status(result: dict) -> int:
+    """HTTP status for a start result: a missing tool is the operator's to
+    fix (400); anything else refused a start that conflicts (409)."""
+    if result.get("status") != "error":
+        return 200
+    return 400 if result.get("error_type") == "TOOL_MISSING" else 409
+
+
 # SSE queue for streaming events to frontend
 _subghz_queue: queue.Queue = queue.Queue(maxsize=200)
 
@@ -167,8 +176,7 @@ def start_receive():
         device_serial=device_serial,
     )
 
-    status_code = 200 if result.get("status") != "error" else 409
-    return jsonify(result), status_code
+    return jsonify(result), _start_status(result)
 
 
 @subghz_bp.route("/receive/stop", methods=["POST"])
@@ -209,8 +217,7 @@ def start_decode():
         device_serial=device_serial,
     )
 
-    status_code = 200 if result.get("status") != "error" else 409
-    return jsonify(result), status_code
+    return jsonify(result), _start_status(result)
 
 
 @subghz_bp.route("/decode/stop", methods=["POST"])
@@ -292,6 +299,15 @@ def start_sweep():
     bin_width = _validate_int(data, "bin_width", 100000, 10000, 5000000)
     device_serial = _validate_serial(data)
 
+    # A TSCM RF sweep drives the same SDR; refuse rather than colliding on it.
+    try:
+        import routes.tscm as tscm
+
+        if tscm.is_rf_scan_active():
+            return api_error("HackRF is in use by a TSCM RF sweep. Stop it first.", 409)
+    except Exception:
+        pass
+
     manager = get_subghz_manager()
     manager.set_callback(_event_callback)
 
@@ -302,8 +318,7 @@ def start_sweep():
         device_serial=device_serial,
     )
 
-    status_code = 200 if result.get("status") != "error" else 409
-    return jsonify(result), status_code
+    return jsonify(result), _start_status(result)
 
 
 @subghz_bp.route("/sweep/stop", methods=["POST"])
@@ -342,6 +357,28 @@ def get_capture(capture_id: str):
         return api_error("Capture not found", 404)
 
     return jsonify({"status": "ok", "capture": capture.to_dict()})
+
+
+@subghz_bp.route("/captures/<capture_id>/inspect")
+def inspect_capture(capture_id: str):
+    if not capture_id.isalnum():
+        return api_error("Invalid capture_id", 400)
+
+    burst_raw = request.args.get("burst")
+    burst_index = None
+    if burst_raw not in (None, ""):
+        try:
+            burst_index = int(burst_raw)
+        except ValueError:
+            return api_error("burst must be an integer", 400)
+        if burst_index < 0:
+            return api_error("burst must be 0 or more", 400)
+
+    result = get_subghz_manager().inspect_capture(capture_id, burst_index)
+    if result.get("status") == "ok":
+        return jsonify(result)
+    message = str(result.get("message") or "Inspection failed")
+    return jsonify(result), 404 if "not found" in message.lower() else 400
 
 
 @subghz_bp.route("/captures/<capture_id>/download")

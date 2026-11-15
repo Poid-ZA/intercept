@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Blueprint, Response, jsonify, make_response, render_template, request
 
-from config import SHARED_OBSERVER_LOCATION_ENABLED
+from config import DEFAULT_LATITUDE, DEFAULT_LONGITUDE, SHARED_OBSERVER_LOCATION_ENABLED
 from utils import tle_store
 from utils.database import (
     add_tracked_satellite,
@@ -341,7 +342,7 @@ def _start_satellite_tracker():
                 msg = {
                     "type": "positions",
                     "positions": positions,
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat(),
                 }
                 try:
                     app_module.satellite_queue.put_nowait(msg)
@@ -355,6 +356,30 @@ def _start_satellite_tracker():
 
 
 _TLE_REFRESH_INTERVAL_SECONDS = 24 * 60 * 60  # 24 hours
+# CelesTrak blocks addresses that download the same data too often (403
+# Forbidden for everything from that IP); it asks for no more than one
+# download every two hours. A fetch at every start broke that with a few
+# restarts, so the schedule is kept across restarts.
+_TLE_MIN_RETRY_SECONDS = 2 * 60 * 60
+
+
+def _tle_startup_delay(now: float | None = None) -> float:
+    """Seconds until the next TLE fetch is due: 24 hours after the last one
+    that succeeded, and never within two hours of the last attempt."""
+    from utils.database import get_setting
+
+    now = time.time() if now is None else now
+    due = 0.0
+    try:
+        last_success = float(get_setting("tle.last_fetch_success") or 0)
+        last_attempt = float(get_setting("tle.last_fetch_attempt") or 0)
+    except (TypeError, ValueError):
+        return 2.0
+    if last_success:
+        due = max(due, last_success + _TLE_REFRESH_INTERVAL_SECONDS)
+    if last_attempt:
+        due = max(due, last_attempt + _TLE_MIN_RETRY_SECONDS)
+    return max(2.0, min(due - now, _TLE_REFRESH_INTERVAL_SECONDS))
 
 
 def init_tle_auto_refresh():
@@ -377,9 +402,10 @@ def init_tle_auto_refresh():
             # Schedule next refresh regardless of success/failure
             _schedule_next_tle_refresh()
 
-    # First refresh 2 seconds after startup, then every 24 hours
-    threading.Timer(2.0, _auto_refresh_tle).start()
-    logger.info("TLE auto-refresh scheduled (24h interval)")
+    # First refresh when due (2 seconds after startup if never fetched), then every 24 hours
+    delay = _tle_startup_delay()
+    threading.Timer(delay, _auto_refresh_tle).start()
+    logger.info(f"TLE auto-refresh scheduled (24h interval, next in {delay / 3600:.1f} h)")
 
     # Start live position tracker thread
     tracker_thread = threading.Thread(
@@ -488,6 +514,25 @@ def satellite_dashboard():
         render_template(
             "satellite_dashboard.html",
             shared_observer_location=SHARED_OBSERVER_LOCATION_ENABLED,
+            embedded=embedded,
+        )
+    )
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    response.headers["Expires"] = "0"
+    return response
+
+
+@satellite_bp.route("/iss")
+def iss_dashboard():
+    """ISS mission-control dashboard (position, ground track, passes)."""
+    embedded = request.args.get("embedded", "false") == "true"
+    response = make_response(
+        render_template(
+            "iss_dashboard.html",
+            shared_observer_location=SHARED_OBSERVER_LOCATION_ENABLED,
+            default_latitude=DEFAULT_LATITUDE,
+            default_longitude=DEFAULT_LONGITUDE,
             embedded=embedded,
         )
     )
@@ -640,6 +685,114 @@ def predict_passes():
         return api_error(f"Failed to calculate passes: {exc}", 500)
 
 
+@satellite_bp.route("/iss/live")
+def iss_live():
+    """Consolidated live ISS data for the ISS dashboard.
+
+    Everything here is computed locally from the ISS TLE via skyfield, so it
+    works regardless of the NASA telemetry feed's AOS/LOS state. Returns the
+    current sub-point, inertial velocity, a ground track (-45..+45 min), the
+    observer-relative look angles (when lat/lon given) and the next passes.
+    """
+    try:
+        from skyfield.api import EarthSatellite, wgs84
+    except ImportError:
+        return api_error("skyfield not installed", 503)
+    from datetime import timedelta
+
+    from utils.satellite_predict import predict_passes
+
+    observer_lat = observer_lon = None
+    lat_arg = request.args.get("lat")
+    lon_arg = request.args.get("lon")
+    if lat_arg not in (None, "") and lon_arg not in (None, ""):
+        try:
+            observer_lat = validate_latitude(lat_arg)
+            observer_lon = validate_longitude(lon_arg)
+        except ValueError as e:
+            return api_error(str(e), 400)
+
+    # Resolve the ISS TLE the same way /predict does (cache → tracked → fetch).
+    tracked_by_norad, tracked_by_name = _get_tracked_satellite_maps()
+    tles = _get_tle_cache()
+    pending: dict = {}
+    _sat_name, norad_id, tle_data = _resolve_satellite_request(
+        "ISS", tracked_by_norad, tracked_by_name, tles, pending
+    )
+    if pending:
+        with contextlib.suppress(Exception):
+            tle_store.update(pending)
+    if not tle_data:
+        return api_error("ISS TLE unavailable", 503)
+
+    try:
+        ts = _get_timescale()
+        satellite = EarthSatellite(tle_data[1], tle_data[2], tle_data[0], ts)
+        t0 = ts.now()
+
+        geo = satellite.at(t0)
+        sp = wgs84.subpoint(geo)
+        vx, vy, vz = geo.velocity.km_per_s
+        speed_kmh = round(((vx * vx + vy * vy + vz * vz) ** 0.5) * 3600.0, 1)
+        result: dict = {
+            "status": "success",
+            "norad_id": norad_id or 25544,
+            "timestamp": t0.utc_iso(),
+            "position": {
+                "lat": round(float(sp.latitude.degrees), 4),
+                "lon": round(float(sp.longitude.degrees), 4),
+                "altitude_km": round(float(sp.elevation.km), 1),
+                "velocity_kmh": speed_kmh,
+            },
+        }
+
+        # Ground track: one point per minute from -45 to +45 minutes.
+        base_dt = t0.utc_datetime()
+        track = []
+        for minute in range(-45, 46):
+            tt = ts.utc(base_dt + timedelta(minutes=minute))
+            tsp = wgs84.subpoint(satellite.at(tt))
+            track.append([round(float(tsp.latitude.degrees), 3), round(float(tsp.longitude.degrees), 3)])
+        result["ground_track"] = track
+
+        if observer_lat is not None:
+            observer = wgs84.latlon(observer_lat, observer_lon)
+            alt_deg, az_deg, dist_km = (satellite - observer).at(t0).altaz()
+            result["observer"] = {
+                "elevation": round(float(alt_deg.degrees), 1),
+                "azimuth": round(float(az_deg.degrees), 1),
+                "range_km": round(float(dist_km.km), 1),
+                "visible": bool(alt_deg.degrees > 0),
+            }
+            t1 = ts.utc(base_dt + timedelta(hours=24))
+            try:
+                passes = predict_passes(tle_data, observer, ts, t0, t1, min_el=10)
+                result["next_passes"] = passes[:3]
+            except Exception as e:
+                logger.debug(f"ISS pass prediction failed: {e}")
+                result["next_passes"] = []
+
+        return jsonify(result)
+    except Exception as exc:
+        logger.exception("ISS live computation failed")
+        return api_error(f"Failed to compute ISS position: {exc}", 500)
+
+
+@satellite_bp.route("/iss/telemetry")
+def iss_telemetry():
+    """Latest live ISS telemetry from NASA's public Lightstreamer feed.
+
+    Returns an AOS/LOS flag plus the curated telemetry snapshot. When the
+    station is in Loss of Signal the feed goes quiet and ``aos`` is false, so
+    the dashboard shows an LOS state instead of stale numbers.
+    """
+    try:
+        from utils.iss_telemetry import get_iss_telemetry_client
+    except Exception as e:  # pragma: no cover - defensive import guard
+        return api_error(f"ISS telemetry unavailable: {e}", 503)
+    return jsonify(get_iss_telemetry_client().get_snapshot())
+
+
 @satellite_bp.route("/position", methods=["POST"])
 def get_satellite_position():
     """Get real-time positions of satellites."""
@@ -771,7 +924,7 @@ def get_satellite_position():
         except Exception as e:
             logger.warning(f"TLE write-back failed (non-fatal): {e}")
 
-    return jsonify({"status": "success", "positions": positions, "timestamp": datetime.utcnow().isoformat()})
+    return jsonify({"status": "success", "positions": positions, "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat()})
 
 
 @satellite_bp.route("/transmitters/<int:norad_id>")
@@ -838,9 +991,14 @@ def refresh_tle_data() -> list:
         "METEOR-M2 4": "METEOR-M2-4",
     }
 
+    from utils.database import set_setting
+
     updated = []
     new_entries: dict = {}
     current = _get_tle_cache()
+    fetched_any = False
+    with contextlib.suppress(Exception):
+        set_setting("tle.last_fetch_attempt", time.time())
 
     for group in ["stations", "weather", "noaa"]:
         url = f"https://celestrak.org/NORAD/elements/gp.php?GROUP={group}&FORMAT=tle"
@@ -848,6 +1006,7 @@ def refresh_tle_data() -> list:
             with urllib.request.urlopen(url, timeout=15) as response:
                 content = response.read().decode("utf-8")
                 lines = content.strip().split("\n")
+                fetched_any = True
 
                 i = 0
                 while i + 2 < len(lines):
@@ -873,6 +1032,9 @@ def refresh_tle_data() -> list:
 
     if new_entries:
         tle_store.update(new_entries)
+    if fetched_any:
+        with contextlib.suppress(Exception):
+            set_setting("tle.last_fetch_success", time.time())
 
     return updated
 

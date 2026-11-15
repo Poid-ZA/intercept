@@ -15,12 +15,11 @@ import csv
 import io
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from utils.tscm.signal_classification import (
     SIGNAL_ANALYSIS_DISCLAIMER,
     assess_signal,
-    generate_hedged_statement,
 )
 
 logger = logging.getLogger("intercept.tscm.reports")
@@ -48,6 +47,10 @@ class ReportFinding:
     signal_confidence: str | None = None  # low, medium, high
     signal_interpretation: str | None = None
     signal_caveats: list[str] = field(default_factory=list)
+    # What was measured, for the client report (None when not recorded)
+    rssi: float | None = None
+    observed_seconds: float | None = None
+    sightings: int | None = None
 
 
 @dataclass
@@ -85,7 +88,7 @@ class TSCMReport:
 
     # Executive summary
     executive_summary: str = ""
-    overall_risk_assessment: str = "low"  # low, moderate, elevated, high
+    overall_risk_assessment: str = "low"  # inconclusive, low, moderate, elevated, high
     key_findings_count: int = 0
 
     # Capabilities used
@@ -188,15 +191,27 @@ def generate_executive_summary(report: TSCMReport) -> str:
     lines.append(f"Duration: {report.duration_minutes:.0f} minutes")
     lines.append("")
 
-    # Overall assessment
-    assessment_text = {
-        "low": "No significant indicators of surveillance activity were detected.",
-        "moderate": "Some devices require review but no confirmed surveillance indicators.",
-        "elevated": "Multiple indicators warrant further investigation.",
-        "high": "Significant indicators detected requiring immediate attention.",
-    }
-    lines.append(f"OVERALL ASSESSMENT: {report.overall_risk_assessment.upper()}")
-    lines.append(assessment_text.get(report.overall_risk_assessment, ""))
+    # Overall assessment: what needs doing, not an adjective derived from a count
+    if report.overall_risk_assessment == "inconclusive":
+        lines.append("OVERALL ASSESSMENT: INCONCLUSIVE")
+        lines.append(
+            "No devices were detected on any band. This usually means the sweep equipment "
+            "was not receiving, and is not evidence that the area is clear."
+        )
+    else:
+        actions = [
+            _count_devices(len(findings), action)
+            for findings, action in (
+                (report.high_interest_findings, "investigation"),
+                (report.needs_review_findings, "review"),
+            )
+            if findings
+        ]
+        if actions:
+            lines.append(f"OVERALL ASSESSMENT: {', '.join(actions)}.")
+        else:
+            lines.append("OVERALL ASSESSMENT: No devices require investigation or review.")
+            lines.append("No significant indicators of surveillance activity were detected.")
     lines.append("")
 
     # Key statistics
@@ -243,8 +258,36 @@ def generate_executive_summary(report: TSCMReport) -> str:
     return "\n".join(lines)
 
 
+def _count_devices(n: int, action: str) -> str:
+    return f"{n} device requires {action}" if n == 1 else f"{n} devices require {action}"
+
+
+def _describe_measurements(finding: ReportFinding) -> str | None:
+    """'-48 dBm, observed for 80 minutes (40 sightings)', from what was recorded."""
+    parts = []
+    if finding.rssi is not None:
+        parts.append(f"{finding.rssi:.0f} dBm")
+    if finding.observed_seconds is not None:
+        minutes = round(finding.observed_seconds / 60)
+        if finding.observed_seconds < 60:
+            parts.append("observed for under a minute")
+        else:
+            parts.append(f"observed for {minutes} minute{'' if minutes == 1 else 's'}")
+    text = ", ".join(parts)
+    if finding.sightings is not None:
+        sightings = f"{finding.sightings} sighting{'' if finding.sightings == 1 else 's'}"
+        text = f"{text} ({sightings})" if text else sightings
+    return text or None
+
+
 def generate_findings_section(findings: list[ReportFinding], title: str) -> str:
-    """Generate a findings section for the report with confidence-safe language."""
+    """Generate a findings section for the client report.
+
+    States what was measured and the pattern observed. The derived signal
+    confidence, interpretation and risk score stay in the technical annexes:
+    they rest on RSSI, duration and a sum of unrelated indicator scores, and
+    read to a client as more certain than they are.
+    """
     if not findings:
         return f"{title}\n\nNo findings in this category.\n"
 
@@ -254,19 +297,12 @@ def generate_findings_section(findings: list[ReportFinding], title: str) -> str:
         lines.append(f"{i}. {finding.name or finding.identifier}")
         lines.append(f"   Protocol: {finding.protocol.upper()}")
         lines.append(f"   Identifier: {finding.identifier}")
-        lines.append(f"   Risk Score: {finding.risk_score}")
 
-        # Signal classification with confidence
-        if finding.signal_strength:
-            confidence_label = (finding.signal_confidence or "low").capitalize()
-            strength_label = finding.signal_strength.replace("_", " ").title()
-            lines.append(f"   Signal: {strength_label} (Confidence: {confidence_label})")
+        measurements = _describe_measurements(finding)
+        if measurements:
+            lines.append(f"   Signal: {measurements}")
 
         lines.append(f"   Assessment: {finding.description}")
-
-        # Interpretation with hedged language
-        if finding.signal_interpretation:
-            lines.append(f"   Interpretation: {finding.signal_interpretation}")
 
         if finding.indicators:
             lines.append("   Indicators:")
@@ -365,14 +401,8 @@ def generate_pdf_content(report: TSCMReport) -> str:
     sections.append("")
 
     if report.capabilities:
-        caps = report.capabilities
         sections.append("Equipment Used:")
-        if caps.get("wifi", {}).get("mode") != "unavailable":
-            sections.append(f"  - WiFi: {caps.get('wifi', {}).get('mode', 'unknown')} mode")
-        if caps.get("bluetooth", {}).get("mode") != "unavailable":
-            sections.append(f"  - Bluetooth: {caps.get('bluetooth', {}).get('mode', 'unknown')}")
-        if caps.get("rf", {}).get("available"):
-            sections.append(f"  - RF/SDR: {caps.get('rf', {}).get('device_type', 'unknown')}")
+        sections.extend(f"  - {item}" for item in describe_equipment(report.capabilities))
         sections.append("")
 
     if report.limitations:
@@ -399,6 +429,56 @@ def generate_pdf_content(report: TSCMReport) -> str:
     sections.append("=" * 70)
 
     return "\n".join(sections)
+
+
+def describe_equipment(caps: dict) -> list[str]:
+    """The equipment a sweep used, one line each, from its capabilities."""
+    items = []
+    if caps.get("wifi", {}).get("mode") != "unavailable":
+        items.append(f"WiFi: {caps.get('wifi', {}).get('mode', 'unknown')} mode")
+    if caps.get("bluetooth", {}).get("mode") != "unavailable":
+        items.append(f"Bluetooth: {caps.get('bluetooth', {}).get('mode', 'unknown')}")
+    if caps.get("rf", {}).get("available"):
+        items.append(f"RF/SDR: {caps.get('rf', {}).get('device_type', 'unknown')}")
+    return items
+
+
+def report_html_context(report: TSCMReport) -> dict:
+    """What the printable client report (templates/tscm_report.html) shows:
+    the same content as the text report, structured for HTML. Values are
+    left unescaped; the template escapes them."""
+
+    def finding(f: ReportFinding) -> dict:
+        return {
+            "title": f.name or f.identifier,
+            "protocol": f.protocol.upper(),
+            "identifier": f.identifier,
+            "measurements": _describe_measurements(f),
+            "assessment": f.description,
+            "indicators": [f"{ind.get('type', 'unknown')}: {ind.get('description', '')}" for ind in f.indicators[:5]],
+            "action": f.recommended_action,
+            "reference": f.playbook_reference,
+            "note": f.signal_caveats[0] if f.signal_caveats and f.risk_level == "high_interest" else None,
+        }
+
+    return {
+        "report": report,
+        "generated": report.generated_at.strftime("%Y-%m-%d %H:%M:%S"),
+        "executive_summary": report.executive_summary or generate_executive_summary(report),
+        "sections": [
+            (title, [finding(f) for f in findings])
+            for title, findings in (
+                ("High interest findings", report.high_interest_findings),
+                ("Findings requiring review", report.needs_review_findings),
+            )
+            if findings
+        ],
+        "meetings": report.meeting_summaries,
+        "equipment": describe_equipment(report.capabilities) if report.capabilities else [],
+        "limitations": report.limitations,
+        "signal_note": SIGNAL_ANALYSIS_DISCLAIMER.strip(),
+        "disclaimer": REPORT_DISCLAIMER.strip(),
+    }
 
 
 def generate_technical_annex_json(report: TSCMReport) -> dict:
@@ -502,6 +582,12 @@ def generate_technical_annex_csv(report: TSCMReport) -> str:
     output = io.StringIO()
     writer = csv.writer(output)
 
+    # Timelines carry no risk fields; take them from the device's finding.
+    findings_by_id = {
+        f.identifier: f
+        for f in report.high_interest_findings + report.needs_review_findings + report.informational_findings
+    }
+
     # Header
     writer.writerow(
         [
@@ -525,7 +611,9 @@ def generate_technical_annex_csv(report: TSCMReport) -> str:
 
     # Device data from timelines
     for timeline in report.device_timelines:
-        indicators_str = "; ".join(f"{i.get('type', '')}({i.get('score', 0)})" for i in timeline.get("indicators", []))
+        finding = findings_by_id.get(timeline.get("identifier"))
+        indicators = timeline.get("indicators") or (finding.indicators if finding else [])
+        indicators_str = "; ".join(f"{i.get('type', '')}({i.get('score', 0)})" for i in indicators)
 
         signal = timeline.get("signal", {})
         metrics = timeline.get("metrics", {})
@@ -533,23 +621,25 @@ def generate_technical_annex_csv(report: TSCMReport) -> str:
         meeting = timeline.get("meeting_correlation", {})
 
         writer.writerow(
-            [
-                timeline.get("identifier", ""),
-                timeline.get("protocol", ""),
-                timeline.get("name", ""),
-                timeline.get("risk_level", "informational"),
-                timeline.get("risk_score", 0),
-                metrics.get("first_seen", ""),
-                metrics.get("last_seen", ""),
-                metrics.get("total_observations", 0),
-                signal.get("rssi_min", ""),
-                signal.get("rssi_max", ""),
-                signal.get("rssi_mean", ""),
-                signal.get("stability", ""),
-                movement.get("pattern", ""),
-                meeting.get("correlated", False),
-                indicators_str,
-            ]
+            _formula_safe(
+                [
+                    timeline.get("identifier", ""),
+                    timeline.get("protocol", ""),
+                    timeline.get("name", ""),
+                    timeline.get("risk_level") or (finding.risk_level if finding else "informational"),
+                    timeline.get("risk_score") or (finding.risk_score if finding else 0),
+                    metrics.get("first_seen", ""),
+                    metrics.get("last_seen", ""),
+                    metrics.get("total_observations", 0),
+                    signal.get("rssi_min", ""),
+                    signal.get("rssi_max", ""),
+                    signal.get("rssi_mean", ""),
+                    signal.get("stability", ""),
+                    movement.get("pattern", ""),
+                    meeting.get("correlated", False),
+                    indicators_str,
+                ]
+            )
         )
 
     # Also add findings summary
@@ -573,25 +663,82 @@ def generate_technical_annex_csv(report: TSCMReport) -> str:
 
     for finding in all_findings:
         writer.writerow(
-            [
-                finding.identifier,
-                finding.protocol,
-                finding.risk_level,
-                finding.risk_score,
-                finding.signal_strength or "",
-                finding.signal_confidence or "",
-                finding.description,
-                finding.signal_interpretation or "",
-                finding.recommended_action,
-            ]
+            _formula_safe(
+                [
+                    finding.identifier,
+                    finding.protocol,
+                    finding.risk_level,
+                    finding.risk_score,
+                    finding.signal_strength or "",
+                    finding.signal_confidence or "",
+                    finding.description,
+                    finding.signal_interpretation or "",
+                    finding.recommended_action,
+                ]
+            )
         )
 
     return output.getvalue()
 
 
+def _formula_safe(row: list) -> list:
+    """Stop text cells being read as spreadsheet formulas.
+
+    Device names are chosen by whoever owns the device (anyone can advertise
+    a Bluetooth name), and the client opens the annex in Excel or
+    LibreOffice. A leading apostrophe makes the cell literal text.
+    """
+    return ["'" + v if isinstance(v, str) and v.startswith(("=", "+", "-", "@", "\t", "\r")) else v for v in row]
+
+
 # =============================================================================
 # Report Builder
 # =============================================================================
+
+
+def _number(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+_TRACKER_PATTERNS = {
+    "airtag_detected": "an Apple AirTag",
+    "tile_detected": "a Tile tracker",
+    "smarttag_detected": "a Samsung SmartTag",
+    "known_tracker": "a known tracker",
+}
+
+
+def _signal_inputs(profile: dict) -> tuple[float | None, float | None, int | None]:
+    """RSSI, observed duration and sighting count for assess_signal().
+
+    Correlation-engine profiles, which is what the report routes pass, carry
+    rssi_current, detection_count and first_seen/last_seen. The summarised
+    names (rssi_mean, observation_count, observation_duration_seconds) are
+    preferred when a caller provides them.
+    """
+    rssi = next(
+        (n for n in (_number(profile.get(k)) for k in ("rssi_mean", "rssi", "rssi_current")) if n is not None),
+        None,
+    )
+
+    duration = _number(profile.get("observation_duration_seconds"))
+    if duration is None:
+        try:
+            first = datetime.fromisoformat(profile["first_seen"])
+            last = datetime.fromisoformat(profile["last_seen"])
+            duration = max(0.0, (last - first).total_seconds())
+        except (KeyError, TypeError, ValueError):
+            duration = None
+
+    count = _number(profile.get("observation_count"))
+    if count is None:
+        count = _number(profile.get("detection_count"))
+    return rssi, duration, None if count is None else max(1, int(count))
 
 
 class TSCMReportBuilder:
@@ -657,13 +804,14 @@ class TSCMReportBuilder:
         for profile in profiles:
             # Get signal classification data
             signal_data = self._classify_finding_signal(profile)
+            rssi, observed_seconds, sightings = _signal_inputs(profile)
 
             finding = ReportFinding(
-                identifier=profile.get("identifier", ""),
-                protocol=profile.get("protocol", ""),
+                identifier=profile.get("identifier") or "",
+                protocol=profile.get("protocol") or "",
                 name=profile.get("name"),
-                risk_level=profile.get("risk_level", "informational"),
-                risk_score=profile.get("total_score", 0),
+                risk_level=profile.get("risk_level") or "informational",
+                risk_score=profile.get("total_score") or 0,
                 description=self._generate_finding_description(profile),
                 indicators=profile.get("indicators", []),
                 recommended_action=profile.get("recommended_action", "monitor"),
@@ -672,58 +820,46 @@ class TSCMReportBuilder:
                 signal_confidence=signal_data["signal_confidence"],
                 signal_interpretation=signal_data["signal_interpretation"],
                 signal_caveats=signal_data["signal_caveats"],
+                rssi=rssi,
+                observed_seconds=observed_seconds,
+                sightings=sightings,
             )
             self.add_finding(finding)
 
         return self
 
     def _generate_finding_description(self, profile: dict) -> str:
-        """Generate description from profile indicators using hedged language."""
-        indicators = profile.get("indicators", [])
-        protocol = profile.get("protocol", "Unknown").upper()
+        """Describe the pattern the primary indicator shows.
 
-        # Get signal data for context
-        rssi = profile.get("rssi_mean") or profile.get("rssi")
-        duration = profile.get("observation_duration_seconds")
-        observation_count = profile.get("observation_count", 1)
-
-        # Assess signal to determine confidence
-        assessment = assess_signal(rssi, duration, observation_count)
-        confidence = assessment.confidence
+        Says what was seen, not where the device is or how likely it is to be
+        a surveillance device: signal strength alone cannot place a device.
+        """
+        indicators = profile.get("indicators") or []
+        protocol = (profile.get("protocol") or "Unknown").upper()
 
         if not indicators:
-            # Use hedged language based on confidence
-            return generate_hedged_statement(f"Observed {protocol} signal", "device_presence", confidence)
+            return f"{protocol} device observed"
 
-        # Build description with hedged language
         primary = indicators[0]
-        indicator_type = primary.get("type", "pattern")
-
-        # Map indicator types to hedged descriptions
-        if indicator_type in ("airtag_detected", "tile_detected", "smarttag_detected", "known_tracker"):
-            desc = generate_hedged_statement(f"{protocol} signal characteristics", "device_presence", confidence)
-            desc += f" - pattern consistent with {indicator_type.replace('_', ' ')}"
+        indicator_type = primary.get("type")
+        if indicator_type in _TRACKER_PATTERNS:
+            desc = f"Pattern consistent with {_TRACKER_PATTERNS[indicator_type]}"
         elif indicator_type == "audio_capable":
-            desc = generate_hedged_statement("Device characteristics", "surveillance_indicator", confidence)
-            desc += " - audio-capable device type identified"
+            desc = "Audio-capable device"
         elif indicator_type in ("hidden_identity", "hidden_ssid"):
-            desc = generate_hedged_statement("Network configuration", "surveillance_indicator", confidence)
-            desc += " - concealed identity pattern observed"
+            desc = "Concealed identity (hidden name or SSID)"
         else:
-            desc = generate_hedged_statement(f"{protocol} signal pattern", "device_presence", confidence)
+            desc = primary.get("description") or f"{protocol} device observed"
 
-        if len(indicators) > 1:
-            desc += f" (+{len(indicators) - 1} additional indicators)"
-
+        further = len(indicators) - 1
+        if further:
+            desc += f" (+{further} further indicator{'' if further == 1 else 's'})"
         return desc
 
     def _classify_finding_signal(self, profile: dict) -> dict:
         """Extract signal classification data for a finding."""
-        rssi = profile.get("rssi_mean") or profile.get("rssi")
-        duration = profile.get("observation_duration_seconds")
-        observation_count = profile.get("observation_count", 1)
-
-        assessment = assess_signal(rssi, duration, observation_count)
+        rssi, duration, count = _signal_inputs(profile)
+        assessment = assess_signal(rssi, duration, count or 1)
 
         return {
             "signal_strength": assessment.signal_strength.value,
@@ -750,15 +886,21 @@ class TSCMReportBuilder:
         return ""
 
     def add_meeting_summary(self, summary: dict) -> TSCMReportBuilder:
-        """Add meeting window summary."""
+        """Add a meeting window summary: flat counts, or the nested shape
+        MeetingWindowSummary.to_dict() produces (device lists, counts under
+        "summary")."""
+        counts = summary.get("summary") or {}
+        first_seen = summary.get("devices_first_seen", counts.get("new_devices", 0))
+        if isinstance(first_seen, list):
+            first_seen = len(first_seen)
         meeting = ReportMeetingSummary(
             name=summary.get("name"),
-            start_time=summary.get("start_time", ""),
+            start_time=summary.get("start_time") or "",
             end_time=summary.get("end_time"),
-            duration_minutes=summary.get("duration_minutes", 0),
-            devices_first_seen=summary.get("devices_first_seen", 0),
-            behavior_changes=summary.get("behavior_changes", 0),
-            high_interest_devices=summary.get("high_interest_devices", 0),
+            duration_minutes=summary.get("duration_minutes") or 0,
+            devices_first_seen=first_seen,
+            behavior_changes=summary.get("behavior_changes", counts.get("behavior_changes", 0)),
+            high_interest_devices=summary.get("high_interest_devices", counts.get("high_interest", 0)),
         )
         self.report.meeting_summaries.append(meeting)
         return self
@@ -801,6 +943,9 @@ class TSCMReportBuilder:
                 self.report.overall_risk_assessment = "elevated"
         elif self.report.needs_review_findings:
             self.report.overall_risk_assessment = "moderate"
+        elif not self.report.total_devices_scanned and not self.report.informational_findings:
+            # Nothing seen at all points at the equipment, not at a clear room.
+            self.report.overall_risk_assessment = "inconclusive"
         else:
             self.report.overall_risk_assessment = "low"
 
@@ -862,9 +1007,9 @@ def generate_report(
     completed_at = sweep_data.get("completed_at")
     if started_at:
         if isinstance(started_at, str):
-            started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            started_at = _local_time(started_at)
         if completed_at and isinstance(completed_at, str):
-            completed_at = datetime.fromisoformat(completed_at.replace("Z", "+00:00")).replace(tzinfo=None)
+            completed_at = _local_time(completed_at)
         builder.set_sweep_times(started_at, completed_at)
 
     # Capabilities
@@ -881,8 +1026,8 @@ def generate_report(
     # Add findings from profiles
     builder.add_findings_from_profiles(device_profiles)
 
-    # Statistics
-    results = sweep_data.get("results", {})
+    # Statistics (a sweep that has not completed has no results yet)
+    results = sweep_data.get("results") or {}
     wifi_count = results.get("wifi_count")
     if wifi_count is None:
         wifi_count = len(results.get("wifi_devices", results.get("wifi", [])))
@@ -908,11 +1053,30 @@ def generate_report(
         missing=baseline_diff.get("summary", {}).get("missing_devices", 0) if baseline_diff else 0,
     )
 
+    # An enabled band that saw nothing points at the equipment. Wi-Fi and
+    # Bluetooth are never empty in an occupied building; a quiet RF band can
+    # be genuine, so it is not called out. Leads the limitations because the
+    # executive summary shows only the first three.
+    if sweep_data.get("results") is not None:
+        silent = [
+            band
+            for band, enabled, count in (
+                ("Wi-Fi", "wifi_enabled", wifi_count + wifi_client_count),
+                ("Bluetooth", "bt_enabled", bt_count),
+            )
+            if sweep_data.get(enabled, True) and count == 0
+        ]
+        builder.report.limitations = [
+            f"{band} was enabled but detected no devices; verify the adapter" for band in silent
+        ] + builder.report.limitations
+
     # Technical data
     builder.add_device_timelines(timelines)
 
     if baseline_diff:
         builder.add_baseline_diff(baseline_diff)
+        if baseline_diff.get("baseline_name"):
+            builder.set_baseline(baseline_diff.get("baseline_id"), baseline_diff["baseline_name"])
 
     if meeting_summaries:
         for summary in meeting_summaries:
@@ -929,6 +1093,18 @@ def generate_report(
     builder.add_all_indicators(all_indicators)
 
     return builder.build()
+
+
+def _local_time(value: str) -> datetime:
+    """A stored timestamp as naive local time, the clock the report uses.
+
+    SQLite's CURRENT_TIMESTAMP is UTC with no offset, so a naive value is
+    read as UTC rather than as local time.
+    """
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone().replace(tzinfo=None)
 
 
 def get_pdf_report(report: TSCMReport) -> str:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 from unittest.mock import MagicMock, patch
@@ -96,12 +97,15 @@ class TestReceive:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         manager._rx_process = mock_proc
-        # Pre-lock device checks now run before active_mode guard
-        manager._hackrf_available = True
+        # Pre-lock device checks now run before active_mode guard. start_receive
+        # resolves hackrf_transfer directly rather than going through
+        # check_hackrf(), so stubbing _hackrf_available is not enough on a host
+        # without the binary installed.
         manager._hackrf_device_cache = True
         manager._hackrf_device_cache_ts = _time.time()
 
-        result = manager.start_receive(frequency_hz=433920000)
+        with patch.object(manager, "_resolve_tool", return_value="/usr/bin/hackrf_transfer"):
+            result = manager.start_receive(frequency_hz=433920000)
         assert result["status"] == "error"
         assert "Already running" in result["message"]
 
@@ -209,8 +213,10 @@ class TestTxSafety:
         mock_proc = MagicMock()
         mock_proc.poll.return_value = None
         manager._rx_process = mock_proc
-        # Pre-lock device checks now run before active_mode guard
-        manager._hackrf_available = True
+        # Pre-lock device checks now run before active_mode guard. transmit()
+        # resolves hackrf_transfer directly rather than going through
+        # check_hackrf(), so stubbing _hackrf_available is not enough on a host
+        # without the binary installed.
         manager._hackrf_device_cache = True
         manager._hackrf_device_cache_ts = _time.time()
         # Capture lookup also runs pre-lock now; provide a valid capture + IQ file
@@ -224,7 +230,8 @@ class TestTxSafety:
         (tmp_data_dir / "captures" / "test.json").write_text(json.dumps(meta))
         (tmp_data_dir / "captures" / "test.iq").write_bytes(b"\x00" * 64)
 
-        result = manager.transmit(capture_id="test123")
+        with patch.object(manager, "_resolve_tool", return_value="/usr/bin/hackrf_transfer"):
+            result = manager.transmit(capture_id="test123")
         assert result["status"] == "error"
         assert "Already running" in result["message"]
 
@@ -518,6 +525,29 @@ class TestSweep:
         result = manager.stop_sweep()
         assert result["status"] == "not_running"
 
+    def test_sweep_output_is_batched(self, manager):
+        # Two full 300-928 MHz passes: 126 lines of 50 bins each, per pass
+        lines = []
+        for sweep in range(2):
+            for hz_low in range(300_000_000, 930_000_000, 5_000_000):
+                powers = ", ".join([f"-{60 + sweep}.0"] * 50)
+                lines.append(f"2026-09-29, 08:46:23.{sweep}, {hz_low}, {hz_low + 5_000_000}, 100000.00, 20, {powers}")
+        proc = MagicMock()
+        proc.stdout = io.BytesIO("\n".join(lines).encode() + b"\n")
+        manager._sweep_process = proc
+        manager._sweep_running = True
+        events = []
+        manager.set_callback(events.append)
+
+        manager._parse_sweep_stdout()
+
+        # One event for the whole burst, not one per line; the later pass wins
+        assert len(events) == 1
+        points = events[0]["points"]
+        assert len(points) == 126 * 50
+        assert points[0] == {"freq": 300.0, "power": -61.0}
+        assert [p["freq"] for p in points] == sorted(p["freq"] for p in points)
+
 
 class TestDecode:
     def test_start_decode_no_hackrf(self, manager):
@@ -545,17 +575,33 @@ class TestDecode:
             assert "rtl_433" in result["message"]
 
     def test_start_decode_success(self, manager):
+        import threading as _threading
+
+        # The reader threads park in stdout.readline() until the process
+        # writes or exits, and their finally block clears _decode_process --
+        # which is what active_mode reports on. A MagicMock readline returns
+        # instantly, so the readers tear that state down while the assertions
+        # below are still running. Block like a real pipe, then release at the
+        # end of the test.
+        release_readers = _threading.Event()
+
+        def blocking_readline():
+            release_readers.wait(timeout=10)
+            return b""
+
         mock_hackrf_proc = MagicMock()
         mock_hackrf_proc.poll.return_value = None
         mock_hackrf_proc.stdout = MagicMock()
+        mock_hackrf_proc.stdout.readline = blocking_readline
         mock_hackrf_proc.stderr = MagicMock()
-        mock_hackrf_proc.stderr.readline = MagicMock(return_value=b"")
+        mock_hackrf_proc.stderr.readline = blocking_readline
 
         mock_rtl433_proc = MagicMock()
         mock_rtl433_proc.poll.return_value = None
         mock_rtl433_proc.stdout = MagicMock()
+        mock_rtl433_proc.stdout.readline = blocking_readline
         mock_rtl433_proc.stderr = MagicMock()
-        mock_rtl433_proc.stderr.readline = MagicMock(return_value=b"")
+        mock_rtl433_proc.stderr.readline = blocking_readline
 
         call_count = [0]
 
@@ -607,6 +653,7 @@ class TestDecode:
 
             # Signal daemon threads to stop so they don't outlive the test
             manager._decode_stop = True
+            release_readers.set()
 
     def test_stop_decode_not_running(self, manager):
         result = manager.stop_decode()

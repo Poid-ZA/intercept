@@ -30,7 +30,7 @@ from utils.doppler import DopplerInfo, DopplerTracker  # noqa: F401
 from utils.logging import get_logger
 
 from .constants import ISS_SSTV_FREQ, SAMPLE_RATE
-from .dsp import goertzel_mag, normalize_audio
+from .dsp import StreamingBandpass, goertzel_mag, normalize_audio
 from .image_decoder import SSTVImageDecoder
 from .modes import get_mode
 from .vis import VISDetector
@@ -90,6 +90,7 @@ class DecodeProgress:
     sstv_tone: str | None = None  # 'leader', 'sync', 'noise', None
     vis_state: str | None = None  # VIS detector state name
     partial_image: str | None = None  # base64 data URL of partial decode
+    doppler: dict | None = None  # DopplerInfo.to_dict() on Doppler updates
 
     def to_dict(self) -> dict:
         result: dict = {
@@ -111,6 +112,8 @@ class DecodeProgress:
             result["vis_state"] = self.vis_state
         if self.partial_image:
             result["partial_image"] = self.partial_image
+        if self.doppler:
+            result["doppler"] = self.doppler
         return result
 
 
@@ -141,6 +144,7 @@ class SSTVDecoder:
     DOPPLER_UPDATE_INTERVAL = 5
 
     def __init__(self, output_dir: str | Path | None = None, url_prefix: str = "/sstv"):
+        self.last_start_error: BaseException | None = None
         self._rtl_process = None
         self._running = False
         self._lock = threading.Lock()
@@ -152,6 +156,8 @@ class SSTVDecoder:
         self._doppler_thread = None
         self._frequency = ISS_SSTV_FREQ
         self._modulation = "fm"
+        self._gain: float | None = None
+        self._ppm: int | None = None
         self._current_tuned_freq_hz: int = 0
         self._device_index = 0
 
@@ -166,6 +172,16 @@ class SSTVDecoder:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def frequency(self) -> float:
+        """Nominal (pre-Doppler) tuned frequency in MHz."""
+        return self._frequency
+
+    @property
+    def modulation(self) -> str:
+        """Demodulation mode passed to rtl_fm (fm, usb, lsb)."""
+        return self._modulation
 
     @property
     def decoder_available(self) -> str:
@@ -183,6 +199,8 @@ class SSTVDecoder:
         latitude: float | None = None,
         longitude: float | None = None,
         modulation: str = "fm",
+        gain: float | None = None,
+        ppm: int | None = None,
     ) -> bool:
         """Start SSTV decoder listening on specified frequency.
 
@@ -192,6 +210,8 @@ class SSTVDecoder:
             latitude: Observer latitude for Doppler correction.
             longitude: Observer longitude for Doppler correction.
             modulation: Demodulation mode for rtl_fm (fm, usb, lsb).
+            gain: Tuner gain in dB; None leaves rtl_fm on auto gain.
+            ppm: Frequency correction in PPM; None or 0 applies none.
 
         Returns:
             True if started successfully.
@@ -203,6 +223,8 @@ class SSTVDecoder:
             self._frequency = frequency
             self._device_index = device_index
             self._modulation = modulation
+            self._gain = gain
+            self._ppm = ppm
 
             # Configure Doppler tracking if location provided
             self._doppler_enabled = False
@@ -239,6 +261,7 @@ class SSTVDecoder:
 
             except Exception as e:
                 self._running = False
+                self.last_start_error = e
                 logger.error(f"Failed to start SSTV decoder: {e}")
                 self._emit_progress(DecodeProgress(status="error", message=str(e)))
                 return False
@@ -261,8 +284,8 @@ class SSTVDecoder:
 
         return nominal_freq_hz
 
-    def _start_pipeline(self, freq_hz: int) -> None:
-        """Start the rtl_fm -> Python decode pipeline."""
+    def _build_rtl_cmd(self, freq_hz: int) -> list[str]:
+        """Build the rtl_fm command for the current settings at freq_hz."""
         rtl_cmd = [
             "rtl_fm",
             "-d",
@@ -277,8 +300,17 @@ class SSTVDecoder:
             str(SAMPLE_RATE),
             "-l",
             "0",  # No squelch
-            "-",
         ]
+        if self._gain is not None:
+            rtl_cmd += ["-g", str(self._gain)]
+        if self._ppm:
+            rtl_cmd += ["-p", str(self._ppm)]
+        rtl_cmd.append("-")
+        return rtl_cmd
+
+    def _start_pipeline(self, freq_hz: int) -> None:
+        """Start the rtl_fm -> Python decode pipeline."""
+        rtl_cmd = self._build_rtl_cmd(freq_hz)
 
         logger.info(f"Starting rtl_fm: {' '.join(rtl_cmd)}")
 
@@ -296,6 +328,7 @@ class SSTVDecoder:
         """
         chunk_bytes = SAMPLE_RATE // 10 * 2  # 100ms of int16 = 9600 bytes
         vis_detector = VISDetector(sample_rate=SAMPLE_RATE)
+        bandpass = StreamingBandpass(sample_rate=SAMPLE_RATE)
         image_decoder: SSTVImageDecoder | None = None
         current_mode_name: str | None = None
         chunk_counter = 0
@@ -304,10 +337,18 @@ class SSTVDecoder:
         logger.info("Audio decode thread started")
         rtl_fm_error: str = ""
 
-        while self._running and self._rtl_process:
+        while self._running:
+            proc = self._rtl_process
+            if proc is None:
+                # Doppler retune in progress; wait for the new rtl_fm
+                time.sleep(0.05)
+                continue
             try:
-                raw_data = self._rtl_process.stdout.read(chunk_bytes)
+                raw_data = proc.stdout.read(chunk_bytes)
                 if not raw_data:
+                    if self._running and self._rtl_process is not proc:
+                        # rtl_fm was restarted by a Doppler retune; read from the new one
+                        continue
                     if self._running:
                         # Read stderr to diagnose why rtl_fm exited
                         stderr_msg = ""
@@ -326,7 +367,7 @@ class SSTVDecoder:
                 if n_samples == 0:
                     continue
                 raw_samples = np.frombuffer(raw_data[: n_samples * 2], dtype=np.int16)
-                samples = normalize_audio(raw_samples)
+                samples = bandpass.process(normalize_audio(raw_samples))
 
                 chunk_counter += 1
 
@@ -381,9 +422,11 @@ class SSTVDecoder:
                         # these are the start of the image and must be fed into
                         # the image decoder before the next chunk arrives.
                         remaining = vis_detector.remaining_buffer.copy()
+                        freq_offset = vis_detector.freq_offset
                         vis_detector.reset()
                         logger.info(
                             f"VIS detected: code={vis_code}, mode={mode_name}, "
+                            f"tuning offset {freq_offset:+.0f} Hz, "
                             f"{len(remaining)} image-start samples retained"
                         )
 
@@ -394,6 +437,7 @@ class SSTVDecoder:
                             image_decoder = SSTVImageDecoder(
                                 mode_spec,
                                 sample_rate=SAMPLE_RATE,
+                                freq_offset=freq_offset,
                             )
                             if len(remaining) > 0:
                                 image_decoder.feed(remaining)
@@ -552,6 +596,7 @@ class SSTVDecoder:
                     DecodeProgress(
                         status="detecting",
                         message=f"Doppler: {doppler_info.shift_hz:+.0f} Hz, elevation: {doppler_info.elevation:.1f}\u00b0",
+                        doppler=doppler_info.to_dict(),
                     )
                 )
 
@@ -586,26 +631,20 @@ class SSTVDecoder:
                     old_proc.kill()
 
         # Build and start new process outside lock
-        rtl_cmd = [
-            "rtl_fm",
-            "-d",
-            str(self._device_index),
-            "-f",
-            str(new_freq_hz),
-            "-M",
-            self._modulation,
-            "-s",
-            str(SAMPLE_RATE),
-            "-r",
-            str(SAMPLE_RATE),
-            "-l",
-            "0",
-            "-",
-        ]
+        rtl_cmd = self._build_rtl_cmd(new_freq_hz)
 
         logger.debug(f"Restarting rtl_fm: {' '.join(rtl_cmd)}")
 
-        new_proc = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            new_proc = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except Exception as e:
+            logger.error(f"Failed to restart rtl_fm for Doppler retune: {e}")
+            with self._lock:
+                was_running = self._running
+                self._running = False
+            if was_running:
+                self._emit_progress(DecodeProgress(status="error", message=f"rtl_fm failed to retune: {e}"))
+            return
 
         # Re-acquire lock to install new process
         with self._lock:
@@ -770,6 +809,9 @@ class SSTVDecoder:
             if file_sample_rate != SAMPLE_RATE:
                 audio = self._resample(audio, file_sample_rate, SAMPLE_RATE)
 
+            # Same bandpass as the live pipeline (see StreamingBandpass)
+            audio = StreamingBandpass(sample_rate=SAMPLE_RATE).process(audio)
+
             # Process through VIS detector + image decoder
             vis_detector = VISDetector(sample_rate=SAMPLE_RATE)
             image_decoder: SSTVImageDecoder | None = None
@@ -815,8 +857,12 @@ class SSTVDecoder:
                     if result is not None:
                         vis_code, mode_name = result
                         remaining = vis_detector.remaining_buffer.copy()
+                        freq_offset = vis_detector.freq_offset
                         vis_detector.reset()
-                        logger.info(f"VIS detected in file: code={vis_code}, mode={mode_name}")
+                        logger.info(
+                            f"VIS detected in file: code={vis_code}, mode={mode_name}, "
+                            f"tuning offset {freq_offset:+.0f} Hz"
+                        )
 
                         mode_spec = get_mode(vis_code)
                         if mode_spec:
@@ -824,6 +870,7 @@ class SSTVDecoder:
                             image_decoder = SSTVImageDecoder(
                                 mode_spec,
                                 sample_rate=SAMPLE_RATE,
+                                freq_offset=freq_offset,
                             )
                             if len(remaining) > 0:
                                 image_decoder.feed(remaining)

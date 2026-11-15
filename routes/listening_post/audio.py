@@ -11,6 +11,7 @@ import time
 from flask import Response, jsonify, request
 
 import routes.listening_post as _state
+from utils.responses import start_failure
 
 from . import (
     _start_audio_stream,
@@ -44,6 +45,9 @@ def start_audio() -> Response:
         request_token_raw = data.get("request_token")
         request_token = int(request_token_raw) if request_token_raw is not None else None
         bias_t_raw = data.get("bias_t", scanner_config.get("bias_t", False))
+        # False when the client has just paused the waterfall: its capture may
+        # still be winding down and must not be picked as the audio source
+        allow_shared = data.get("allow_shared", True) is not False
         if isinstance(bias_t_raw, str):
             bias_t = bias_t_raw.strip().lower() in {"1", "true", "yes", "on"}
         else:
@@ -110,6 +114,10 @@ def start_audio() -> Response:
                 with contextlib.suppress(Exception):
                     scanner_proc_ref.kill()
         with contextlib.suppress(Exception):
+            # SIGTERM first so rtl_power can close its USB handle cleanly.
+            subprocess.run(["pkill", "rtl_power"], capture_output=True, timeout=0.5)
+        time.sleep(0.2)
+        with contextlib.suppress(Exception):
             subprocess.run(["pkill", "-9", "rtl_power"], capture_output=True, timeout=0.5)
         time.sleep(0.5)
 
@@ -124,7 +132,7 @@ def start_audio() -> Response:
             )
 
             shared = get_shared_capture_status()
-            if shared.get("running") and shared.get("device") == device:
+            if allow_shared and shared.get("running") and shared.get("device") == device:
                 _stop_audio_stream()
                 ok, msg = start_shared_monitor_from_capture(
                     device=device,
@@ -214,6 +222,9 @@ def start_audio() -> Response:
             app_module.release_sdr_device(_state.receiver_active_device, _state.receiver_active_sdr_type)
             _state.receiver_active_device = None
             _state.receiver_active_sdr_type = "rtlsdr"
+
+        if _state.audio_start_error is not None:
+            return start_failure(_state.audio_start_error, "audio")
 
         start_error = ""
         for log_path in ("/tmp/rtl_fm_stderr.log", "/tmp/ffmpeg_stderr.log"):

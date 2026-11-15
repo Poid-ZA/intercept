@@ -15,6 +15,8 @@
 const WiFiMode = (function() {
     'use strict';
 
+    const LOCATE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 7 8 11.7z"/></svg>';
+
     // ==========================================================================
     // Configuration
     // ==========================================================================
@@ -126,6 +128,7 @@ const WiFiMode = (function() {
         scanTabs: false,
         filters: false,
         sort: false,
+        radar: false,
     };
 
     // Agent state
@@ -152,10 +155,12 @@ const WiFiMode = (function() {
         cacheDOM();
 
         if (firstInit) {
+            drawRadarFace();
             checkCapabilities();
             initScanModeTabs();
             initNetworkFilters();
             initSortControls();
+            initRadarInteraction();
             initHeatmap();
         }
 
@@ -402,15 +407,19 @@ const WiFiMode = (function() {
     function setScanMode(mode) {
         scanMode = mode;
 
-        // Update tab UI and ARIA states
-        if (elements.scanModeQuick) {
-            elements.scanModeQuick.classList.toggle('active', mode === 'quick');
-            elements.scanModeQuick.setAttribute('aria-selected', mode === 'quick' ? 'true' : 'false');
-        }
-        if (elements.scanModeDeep) {
-            elements.scanModeDeep.classList.toggle('active', mode === 'deep');
-            elements.scanModeDeep.setAttribute('aria-selected', mode === 'deep' ? 'true' : 'false');
-        }
+        // Update tab UI and ARIA states. The tabs carry their colours as inline
+        // styles (see wifi.html), so toggle the inline background/colour here —
+        // an .active class alone has no effect against inline styles.
+        const applyTabStyle = (el, active) => {
+            if (!el) return;
+            el.classList.toggle('active', active);
+            el.setAttribute('aria-selected', active ? 'true' : 'false');
+            el.style.background = active ? 'var(--accent-green)' : 'var(--bg-tertiary)';
+            el.style.color = active ? '#000' : '#888';
+            el.style.border = active ? 'none' : '1px solid var(--border-color)';
+        };
+        applyTabStyle(elements.scanModeQuick, mode === 'quick');
+        applyTabStyle(elements.scanModeDeep, mode === 'deep');
 
         console.log('[WiFiMode] Scan mode set to:', mode);
     }
@@ -1079,8 +1088,33 @@ const WiFiMode = (function() {
         });
     }
 
+    /**
+     * Fill the Attack Options "Target BSSID" dropdown from discovered networks
+     * so the operator can pick a target instead of pasting a BSSID. Preserves
+     * the current selection and sorts by signal (strongest first).
+     */
+    function populateDeauthTargets() {
+        const select = document.getElementById('targetBssidSelect');
+        if (!select) return;
+        const current = select.value;
+        const sorted = Array.from(networks.values())
+            .sort((a, b) => (b.rssi_current ?? -100) - (a.rssi_current ?? -100));
+        const options = ['<option value="">Select a scanned network...</option>'];
+        sorted.forEach(n => {
+            const name = n.display_name || n.essid || '[Hidden]';
+            const label = `${name} — ${n.bssid} (ch ${n.channel || '?'})`;
+            options.push(`<option value="${escapeHtml(n.bssid)}">${escapeHtml(label)}</option>`);
+        });
+        select.innerHTML = options.join('');
+        // Restore prior selection if that network is still present
+        if (current && networks.has(current)) select.value = current;
+    }
+
     function renderNetworks() {
         if (!elements.networkList) return;
+
+        // Keep the deauth target dropdown in sync with discovered networks
+        populateDeauthTargets();
 
         // Snapshot 2.4 GHz channel utilisation (use all networks, not filtered)
         const snapshot = { timestamp: Date.now(), channels: {} };
@@ -1207,6 +1241,8 @@ const WiFiMode = (function() {
                     <div class="row-badges">
                         <span class="badge ${badgeClass}">${escapeHtml(security)}</span>
                         ${hiddenTag}
+                        <button type="button" class="locate-action" title="Locate this network"
+                                onclick="event.stopPropagation(); WiFiMode.locateNetwork(this.closest('.network-row').dataset.bssid)">${LOCATE_ICON}Locate</button>
                     </div>
                 </div>
                 <div class="row-bottom">
@@ -1232,6 +1268,52 @@ const WiFiMode = (function() {
         });
     }
 
+    /**
+     * Hand a network to WiFi Locate and start locating it at once.
+     * Defaults to the selected network.
+     */
+    function locateNetwork(bssid) {
+        bssid = bssid || selectedBssid;
+        if (!bssid) return;
+        const network = networks.get(bssid) || {};
+        const payload = { bssid, ssid: network.essid || network.display_name || null };
+        const go = () => Promise.resolve(WiFiLocate.handoff(payload)).then(() => WiFiLocate.start());
+        if (typeof WiFiLocate !== 'undefined') {
+            go();
+        } else if (typeof switchMode === 'function') {
+            switchMode('wifi_locate').then(() => { if (typeof WiFiLocate !== 'undefined') go(); });
+        }
+    }
+
+    /**
+     * Capture the WPA handshake for the selected network — one click, no
+     * copy/paste. Delegates to the existing captureHandshake(bssid, channel).
+     */
+    function captureSelected() {
+        if (!selectedBssid) return;
+        const network = networks.get(selectedBssid) || {};
+        if (typeof captureHandshake === 'function') {
+            captureHandshake(selectedBssid, network.channel);
+        } else {
+            console.warn('captureHandshake unavailable');
+        }
+    }
+
+    /**
+     * Send deauth to the selected network. Reuses the existing sendDeauth()
+     * flow (keeps the manual target field in sync) so there's one code path.
+     */
+    function deauthSelected() {
+        if (!selectedBssid) return;
+        if (typeof sendDeauth !== 'function') {
+            console.warn('sendDeauth unavailable');
+            return;
+        }
+        const el = document.getElementById('targetBssid');
+        if (el) el.value = selectedBssid;
+        sendDeauth();
+    }
+
     function selectNetwork(bssid) {
         selectedBssid = bssid;
 
@@ -1247,6 +1329,9 @@ const WiFiMode = (function() {
         if (elements.detailBackBtn)   elements.detailBackBtn.style.display = 'inline-block';
 
         updateDetailPanel(bssid);
+
+        // Redraw the radar so the selected blip picks up its highlight ring.
+        scheduleRender({ radar: true });
     }
 
     // ==========================================================================
@@ -1267,7 +1352,7 @@ const WiFiMode = (function() {
             elements.detailEssid.textContent = network.display_name || network.essid || '[Hidden SSID]';
         }
         if (elements.detailBssid) {
-            elements.detailBssid.textContent = network.bssid;
+            elements.detailBssid.innerHTML = CopyId.html(network.bssid) + DeviceNotes.html(network.bssid, 'wifi');
         }
 
         // Update detail stats
@@ -1407,7 +1492,7 @@ const WiFiMode = (function() {
                                rssi >= -85 ? 'signal-weak' : 'signal-very-weak';
 
             // Format last seen time
-            const lastSeen = client.last_seen ? formatTime(client.last_seen) : '--';
+            const lastSeen = InterceptTime.relTimeHtml(client.last_seen) || '--';
 
             // Build probed SSIDs badges
             let probesHtml = '';
@@ -1463,7 +1548,7 @@ const WiFiMode = (function() {
             }
 
             if (lastSeenEl && client.last_seen) {
-                lastSeenEl.textContent = formatTime(client.last_seen);
+                lastSeenEl.innerHTML = InterceptTime.relTimeHtml(client.last_seen);
             }
         } else {
             // New client for this network - re-fetch the full list
@@ -1516,6 +1601,30 @@ const WiFiMode = (function() {
         return (hash >>> 0) / 0x100000000 * 2 * Math.PI;
     }
 
+    /** The radar's rings, ticks and sweep; the same face as Bluetooth's radar. */
+    function drawRadarFace() {
+        const svg = document.getElementById('wifiRadarSvg');
+        if (!svg || svg.dataset.face || typeof RadarFace === 'undefined') return;
+        // Band boundaries match renderRadar's zones (35 and 70 of a 100 radius)
+        svg.insertAdjacentHTML('afterbegin', RadarFace.markup({
+            id: 'wf', size: 210, padding: 5,
+            rings: [{ radius: 0.35, label: 'STRONG' }, { radius: 0.70, label: 'MEDIUM' }, { radius: 1.0, label: 'WEAK' }],
+        }));
+        svg.dataset.face = '1';
+    }
+
+    /** Clicking a radar blip selects that network, same as clicking a list row. */
+    function initRadarInteraction() {
+        if (listenersBound.radar) return;
+        const dotsGroup = document.getElementById('wifiRadarDots');
+        if (!dotsGroup) return;
+        dotsGroup.addEventListener('click', (e) => {
+            const dot = e.target.closest('.wf-radar-dot');
+            if (dot && dot.dataset.bssid) selectNetwork(dot.dataset.bssid);
+        });
+        listenersBound.radar = true;
+    }
+
     function renderRadar(networksList) {
         const dotsGroup = document.getElementById('wifiRadarDots');
         if (!dotsGroup) return;
@@ -1525,19 +1634,23 @@ const WiFiMode = (function() {
 
         networksList.forEach(network => {
             const rssi = network.rssi_current ?? -100;
-            const strength = Math.max(0, Math.min(1, (rssi + 100) / 80));
-            const dotR = 5 + (1 - strength) * 90; // stronger = closer to centre
+            // Bands use the list's signal thresholds (strong above -55 dBm,
+            // medium above -70), so a network the list shows as strong sits
+            // in the strong ring; within its band, stronger is nearer the centre.
+            const band = rssi > -55 ? 0 : rssi > -70 ? 1 : 2;
+            const [bandTop, bandBottom] = [[-30, -55], [-55, -70], [-70, -100]][band];
+            const withinBand = Math.max(0, Math.min(1, (bandTop - rssi) / (bandTop - bandBottom)));
+            const dotR = [5, 35, 70][band] + withinBand * [28, 33, 25][band];
             const angle = bssidToAngle(network.bssid);
             const cx = 105 + dotR * Math.cos(angle);
             const cy = 105 + dotR * Math.sin(angle);
 
-            // Zone counts
-            if (dotR < 35)       zoneCounts.immediate++;
-            else if (dotR < 70)  zoneCounts.near++;
-            else                  zoneCounts.far++;
+            if (band === 0)      zoneCounts.immediate++;
+            else if (band === 1) zoneCounts.near++;
+            else                 zoneCounts.far++;
 
             // Visual radius by zone
-            const vr = dotR < 35 ? 6 : dotR < 70 ? 4.5 : 3;
+            const vr = [6, 4.5, 3][band];
 
             // Colour by security
             const sec = (network.security || '').toLowerCase();
@@ -1546,11 +1659,22 @@ const WiFiMode = (function() {
                          : sec.includes('wep')         ? '#d6a85e'
                          : '#484f58';
 
+            const name = network.display_name || network.essid || '[Hidden]';
+            const isSel = network.bssid === selectedBssid;
+            const selRing = isSel
+                ? `<circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${(vr + 3).toFixed(1)}"
+                           fill="none" stroke="var(--accent-cyan, #22d3ee)" stroke-width="1.5"/>`
+                : '';
+
             dots.push(`
+            <g class="wf-radar-dot" data-bssid="${escapeHtml(network.bssid)}" style="cursor:pointer">
+            <title>${escapeHtml(name)} — ${escapeHtml(network.bssid)} · ch ${network.channel || '?'} · ${rssi} dBm</title>
             <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${vr * 1.5}"
                     fill="${colour}" opacity="0.12"/>
             <circle cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${vr}"
-                    fill="${colour}" opacity="0.9" filter="url(#wifi-glow-sm)"/>
+                    fill="${colour}" opacity="0.9" filter="url(#wf-glow)"/>
+            ${selRing}
+            </g>
         `);
         });
 
@@ -1587,6 +1711,14 @@ const WiFiMode = (function() {
 
         if (elements.heatmapCount) elements.heatmapCount.textContent = channelHistory.length;
 
+        // Scans that found nothing on 2.4 GHz channels 1-11 would draw an empty wall
+        const anyActivity = channelHistory.some(snap => Object.values(snap.channels).some(v => v > 0));
+        if (!anyActivity) {
+            elements.heatmapGrid.innerHTML =
+                `<div class="wifi-heatmap-empty">No networks on 2.4 GHz channels 1–11 in the last ${channelHistory.length} scan${channelHistory.length === 1 ? '' : 's'}</div>`;
+            return;
+        }
+
         // Find max value for colour scale
         let maxVal = 1;
         channelHistory.forEach(snap => {
@@ -1606,9 +1738,10 @@ const WiFiMode = (function() {
     }
 
     function congestionColor(value, maxValue) {
-        if (value === 0 || maxValue === 0) return '#0d1117';
+        // An empty cell: a faint tint that suits either theme
+        if (value === 0 || maxValue === 0) return 'rgba(128,128,128,0.08)';
         const ratio = value / maxValue;
-        if (ratio < 0.05)  return '#0d1117';
+        if (ratio < 0.05)  return 'rgba(128,128,128,0.08)';
         if (ratio < 0.25)  return `rgba(13,74,110,${(ratio * 4).toFixed(2)})`;
         if (ratio < 0.5)   return `rgba(14,165,233,${ratio.toFixed(2)})`;
         if (ratio < 0.75)  return `rgba(249,115,22,${ratio.toFixed(2)})`;
@@ -1849,6 +1982,9 @@ const WiFiMode = (function() {
         startDeepScan,
         stopScan,
         selectNetwork,
+        locateNetwork,
+        captureSelected,
+        deauthSelected,
         closeDetail,
         setFilter: setNetworkFilter,
         exportData,

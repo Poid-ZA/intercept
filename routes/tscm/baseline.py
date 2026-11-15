@@ -6,7 +6,6 @@ Handles /baseline/*, /baselines endpoints.
 
 from __future__ import annotations
 
-import json
 import logging
 from datetime import datetime
 
@@ -153,7 +152,7 @@ def get_baseline_diff(baseline_id: int, sweep_id: int):
     and baseline health assessment.
     """
     try:
-        from utils.tscm.advanced import calculate_baseline_diff
+        from utils.tscm.advanced import diff_sweep_against_baseline
 
         baseline = get_tscm_baseline(baseline_id)
         if not baseline:
@@ -163,24 +162,9 @@ def get_baseline_diff(baseline_id: int, sweep_id: int):
         if not sweep:
             return jsonify({"status": "error", "message": "Sweep not found"}), 404
 
-        # Get current devices from sweep results
-        results = sweep.get("results", {})
-        if isinstance(results, str):
-            results = json.loads(results)
-
-        current_wifi = results.get("wifi_devices", [])
-        current_wifi_clients = results.get("wifi_clients", [])
-        current_bt = results.get("bt_devices", [])
-        current_rf = results.get("rf_signals", [])
-
-        diff = calculate_baseline_diff(
-            baseline=baseline,
-            current_wifi=current_wifi,
-            current_wifi_clients=current_wifi_clients,
-            current_bt=current_bt,
-            current_rf=current_rf,
-            sweep_id=sweep_id,
-        )
+        diff = diff_sweep_against_baseline(baseline, sweep)
+        if diff is None:
+            return jsonify({"status": "error", "message": "Sweep has no results yet; compare once it completes"}), 409
 
         return jsonify({"status": "success", "diff": diff.to_dict()})
 
@@ -197,15 +181,9 @@ def get_baseline_health(baseline_id: int):
         if not baseline:
             return jsonify({"status": "error", "message": "Baseline not found"}), 404
 
-        # Calculate age
-        created_at = baseline.get("created_at")
-        age_hours = 0
-        if created_at:
-            if isinstance(created_at, str):
-                created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-                age_hours = (datetime.now() - created.replace(tzinfo=None)).total_seconds() / 3600
-            elif isinstance(created_at, datetime):
-                age_hours = (datetime.now() - created_at).total_seconds() / 3600
+        from utils.tscm.advanced import baseline_age_hours
+
+        age_hours = baseline_age_hours(baseline.get("created_at"))
 
         # Count devices
         total_devices = (

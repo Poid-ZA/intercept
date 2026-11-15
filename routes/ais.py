@@ -31,8 +31,10 @@ from utils.event_pipeline import process_event
 from utils.logging import get_logger
 from utils.responses import api_error, api_success
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.detection import detect_all_devices
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
-from utils.validation import validate_device_index, validate_gain
+from utils.validation import validate_device_index, validate_gain, validate_ppm
 
 logger = get_logger("intercept.ais")
 
@@ -54,6 +56,14 @@ AIS_CATCHER_PATHS = [
     "/opt/homebrew/bin/AIS-catcher",
     "/opt/homebrew/bin/aiscatcher",
 ]
+
+
+def _detected_serial(sdr_type: SDRType, index: int) -> str:
+    """Serial of the detected device at this index, or "N/A" if it can't be read."""
+    for dev in detect_all_devices():
+        if dev.sdr_type == sdr_type and dev.index == index and dev.serial and dev.serial != "N/A":
+            return dev.serial
+    return "N/A"
 
 
 def find_ais_catcher():
@@ -278,6 +288,16 @@ def process_ais_message(msg: dict) -> dict | None:
         except (ValueError, TypeError):
             pass
 
+    # Where the GPS antenna sits on the hull (metres to bow, stern, port,
+    # starboard), so the map can draw the hull to scale around the reported
+    # position. All four, or none.
+    try:
+        offsets = {key: int(msg[key]) for key in ("to_bow", "to_stern", "to_port", "to_starboard")}
+        if offsets["to_bow"] + offsets["to_stern"] > 0 and offsets["to_port"] + offsets["to_starboard"] > 0:
+            vessel.update(offsets)
+    except (KeyError, ValueError, TypeError):
+        pass
+
     # Draught
     if "draught" in msg:
         try:
@@ -367,11 +387,13 @@ def start_ais():
             return api_error("AIS tracking already active", 409)
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate inputs
     try:
         gain = int(validate_gain(data.get("gain", "40")))
         device = validate_device_index(data.get("device", "0"))
+        ppm = validate_ppm(data.get("ppm", "0"))
     except ValueError as e:
         return api_error(str(e), 400)
 
@@ -386,6 +408,18 @@ def start_ais():
         sdr_type = SDRType(sdr_type_str)
     except ValueError:
         sdr_type = SDRType.RTL_SDR
+
+    # AIS-catcher is pointed at a HackRF by serial; without one it would open
+    # whichever SDR it finds first, possibly an RTL-SDR in use by another mode
+    sdr_serial = "N/A"
+    if sdr_type == SDRType.HACKRF:
+        sdr_serial = _detected_serial(sdr_type, int(device))
+        if sdr_serial == "N/A":
+            return api_error(
+                "Couldn't read the HackRF's serial number, so AIS-catcher can't be pointed at it. "
+                "Check that hackrf_info lists the device, then try again.",
+                400,
+            )
 
     # Kill any existing process
     if app_module.ais_process:
@@ -409,7 +443,7 @@ def start_ais():
         return api_error(error, 409, error_type="DEVICE_BUSY")
 
     # Build command using SDR abstraction
-    sdr_device = SDRFactory.create_default_device(sdr_type, index=device)
+    sdr_device = SDRFactory.create_default_device(sdr_type, index=device, serial=sdr_serial)
     builder = SDRFactory.get_builder(sdr_type)
 
     bias_t = data.get("bias_t", False)
@@ -430,6 +464,7 @@ def start_ais():
         device=sdr_device,
         gain=float(gain),
         bias_t=bias_t,
+        ppm=ppm or None,
         tcp_port=tcp_port,
         udp_host=udp_host,
         udp_port=udp_port,
@@ -456,6 +491,9 @@ def start_ais():
                     stderr_output = app_module.ais_process.stderr.read().decode("utf-8", errors="ignore").strip()
             if stderr_output:
                 logger.error(f"AIS-catcher stderr:\n{stderr_output}")
+            # Don't keep the dead process: the next start/stop would signal its
+            # (possibly reused) pid's whole process group
+            app_module.ais_process = None
             error_msg = "AIS-catcher failed to start. Check SDR device connection."
             if stderr_output:
                 error_msg += f" Error: {stderr_output[:500]}"
@@ -513,16 +551,12 @@ def stop_ais():
 def stream_ais():
     """SSE stream for AIS vessels."""
 
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("ais", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.ais_queue,
             channel_key="ais",
             timeout=SSE_QUEUE_TIMEOUT,
             keepalive_interval=SSE_KEEPALIVE_INTERVAL,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

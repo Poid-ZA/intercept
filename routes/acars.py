@@ -12,8 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
 
 from flask import Blueprint, Response, jsonify, request
 
@@ -25,12 +24,13 @@ from utils.constants import (
     SSE_KEEPALIVE_INTERVAL,
     SSE_QUEUE_TIMEOUT,
 )
-from utils.event_pipeline import process_event
+from utils.dependencies import install_hint
 from utils.flight_correlator import get_flight_correlator
 from utils.logging import sensor_logger as logger
 from utils.process import register_process, unregister_process
 from utils.responses import api_error
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import validate_device_index, validate_gain, validate_ppm
 
@@ -120,7 +120,7 @@ def stream_acars_output(process: subprocess.Popen, is_text_mode: bool = False) -
 
                 # Add our metadata
                 data["type"] = "acars"
-                data["timestamp"] = datetime.utcnow().isoformat() + "Z"
+                data["timestamp"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
                 # Enrich with translated label and parsed fields
                 try:
@@ -215,9 +215,10 @@ def start_acars() -> Response:
     # Check for acarsdec
     acarsdec_path = find_acarsdec()
     if not acarsdec_path:
-        return api_error("acarsdec not found. Install with: sudo apt install acarsdec", 400)
+        return api_error(f"acarsdec not found. {install_hint('acarsdec')}", 400)
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate inputs
     try:
@@ -319,8 +320,9 @@ def start_acars() -> Response:
             master_fd, slave_fd = pty.openpty()
             process = subprocess.Popen(cmd, stdout=slave_fd, stderr=subprocess.PIPE, start_new_session=True)
             os.close(slave_fd)
-            # Wrap master_fd as a text file for line-buffered reading
-            process.stdout = open(master_fd, buffering=1)
+            # Wrap master_fd as a text file for line-buffered reading; replace
+            # undecodable bytes like the pipe path does, so noise can't kill the reader
+            process.stdout = open(master_fd, buffering=1, encoding="utf-8", errors="replace")
             is_text_mode = True
         else:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -371,7 +373,7 @@ def stop_acars() -> Response:
 
     with app_module.acars_lock:
         if not app_module.acars_process:
-            return api_error("ACARS decoder not running", 400)
+            return jsonify({"status": "not_running"})
 
         try:
             app_module.acars_process.terminate()
@@ -396,16 +398,12 @@ def stop_acars() -> Response:
 def stream_acars() -> Response:
     """SSE stream for ACARS messages."""
 
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("acars", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.acars_queue,
             channel_key="acars",
             timeout=SSE_QUEUE_TIMEOUT,
             keepalive_interval=SSE_KEEPALIVE_INTERVAL,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )
@@ -441,7 +439,7 @@ def get_frequencies() -> Response:
             "default": DEFAULT_ACARS_FREQUENCIES,
             "regions": {
                 "north_america": ["131.550", "130.025", "129.125", "131.725", "131.825"],
-                "europe": ["131.525", "131.725", "131.550"],
+                "europe": ["131.525", "131.725", "131.550", "131.825"],
                 "asia_pacific": ["131.550", "131.450"],
             },
         }

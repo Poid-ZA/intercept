@@ -34,7 +34,7 @@
 .drone-vsstat-value {
     font-size: 22px;
     font-weight: 700;
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     color: var(--text-primary);
     line-height: 1;
 }
@@ -65,17 +65,10 @@
 }
 
 .drone-main-map {
+    position: relative;
     flex: 1;
     min-width: 0;
     min-height: 400px;
-}
-
-.drone-empty-state {
-    padding: 24px 12px;
-    text-align: center;
-    font-size: 11px;
-    color: var(--text-dim);
-    line-height: 1.6;
 }
 
 .drone-vector-pills {

@@ -59,6 +59,10 @@ pytest --cov=routes --cov=utils
 
 # Run a specific test
 pytest tests/test_bluetooth.py::test_function_name -v
+
+# Browser smoke test: every mode and dashboard, fails on JS errors
+# (needs: pip install playwright && python -m playwright install chromium)
+pytest tests/smoke -q
 ```
 
 ### Linting and Formatting
@@ -93,12 +97,13 @@ Each signal type has its own Flask blueprint:
 - `wifi.py`, `wifi_v2.py` - WiFi scanning (legacy and unified APIs)
 - `bluetooth.py`, `bluetooth_v2.py` - Bluetooth scanning (legacy and unified APIs)
 - `satellite.py` - Pass prediction using TLE data
-- `sstv.py` - ISS SSTV image decoding via slowrx
+- `sstv.py` - ISS SSTV image decoding (pure-Python decoder in `utils/sstv/`)
 - `weather_sat.py` - NOAA APT & Meteor LRPT via SatDump
 - `ais.py` - AIS vessel tracking and VHF DSC distress monitoring
 - `aprs.py` - Amateur packet radio via direwolf
 - `rtlamr.py` - Utility meter reading
-- `meshtastic_routes.py` - Meshtastic LoRa mesh networking
+- `meshtastic.py` - Meshtastic LoRa mesh networking
+- `meshcore.py` - Meshcore LoRa mesh networking
 
 ### Core Utilities (utils/)
 
@@ -127,9 +132,9 @@ Each signal type has its own Flask blueprint:
 - Subprocess management with stdout parsing, image watcher via rglob
 - Pass prediction using skyfield TLE data
 
-**SSTV Decoder** (`utils/sstv.py`):
-- ISS SSTV reception via slowrx with Doppler tracking
-- Singleton pattern, image gallery with timestamped filenames
+**SSTV Decoder** (`utils/sstv/`):
+- Pure-Python pipeline shared by ISS SSTV and HF SSTV (`sstv_general.py`): rtl_fm audio -> FIR bandpass -> VIS detection -> instantaneous-frequency image decoding (numpy/scipy + Pillow, no external decoder)
+- Doppler tracking for ISS passes; singleton pattern, image gallery with timestamped filenames
 
 ### Key Patterns
 
@@ -152,17 +157,26 @@ Each signal type has its own Flask blueprint:
 | acarsdec | ACARS messages | Output parsing |
 | airmon-ng/airodump-ng | WiFi scanning | Monitor mode, CSV parsing |
 | bluetoothctl/hcitool | Bluetooth | Fallback when DBus unavailable |
-| slowrx | SSTV decoding | Subprocess with audio pipe |
 | SatDump | Weather satellites | CLI live mode, NOAA APT + Meteor LRPT |
 | AIS-catcher | AIS vessel tracking | JSON output parsing |
 | direwolf | APRS | TNC modem for packet radio |
 
 ### Frontend Structure
 - **UI direction (decided 2026-06-12)**: map-heavy modes get dedicated dashboard
-  pages (`/adsb/dashboard`, `/ais/dashboard`, `/satellite/dashboard`); the SPA
-  in `index.html` keeps text/scan modes. APRS and Meshtastic are map-centric
-  and should migrate to dashboards under their own plans — do not grow their
-  SPA footprint.
+  pages; the SPA in `index.html` keeps text/scan modes. The migration is
+  complete — ADS-B, AIS, satellite, APRS, Meshtastic and Meshcore each have a
+  dashboard (`/adsb/dashboard`, `/ais/dashboard`, `/satellite/dashboard`,
+  `/aprs/dashboard`, `/meshtastic/dashboard`, `/meshcore/dashboard`) served by a
+  route on the mode's blueprint. Their nav buttons and welcome-catalog cards
+  link to the dashboard, and each path is in `DASHBOARD_NAV_PATHS`
+  (`static/js/modes/core-mode-switch.js`) so the SPA tears scans down on
+  navigation. Do not re-add these modes to the SPA registry.
+- **Dashboards**: `templates/<mode>_dashboard.html` — standalone pages using
+  bundled (offline) assets. APRS/Meshtastic/Meshcore share page chrome via
+  `static/css/dashboard-shell.css` (linked before each dashboard's own
+  `static/css/<mode>_dashboard.css`); ADS-B/AIS/satellite predate it and carry
+  their own chrome. Mesh dashboards reuse the existing self-contained
+  `static/js/modes/{meshtastic,meshcore}.js` modules unchanged.
 - **Templates**: `templates/index.html` (main SPA), `templates/partials/modes/*.html` (sidebar panels), `templates/partials/nav.html` (global nav)
 - **JS Modules**: `static/js/modes/*.js` - IIFE pattern per mode (e.g., `WeatherSat`, `SSTV`, `Meshtastic`)
 - **CSS**: `static/css/modes/*.css` - scoped styles per mode, CSS variables for theming (`--bg-card`, `--accent-cyan`, `--font-mono`)
@@ -175,7 +189,7 @@ Each signal type has its own Flask blueprint:
   `tests/test_mode_registry.py` enforces registry/asset consistency.
 
 ### Docker
-- `Dockerfile` - Single-stage build with all SDR tools compiled from source (dump1090, AIS-catcher, slowrx, SatDump, etc.). CMD runs `start.sh` (gunicorn + gevent)
+- `Dockerfile` - Single-stage build with all SDR tools compiled from source (dump1090, AIS-catcher, SatDump, etc.). CMD runs `start.sh` (gunicorn + gevent)
 - `docker-compose.yml` - Two profiles: `basic` (standalone) and `history` (with Postgres for ADS-B)
 - `build-multiarch.sh` - Multi-arch build script for amd64 + arm64 (RPi5)
 - Data persisted via `./data:/app/data` volume mount

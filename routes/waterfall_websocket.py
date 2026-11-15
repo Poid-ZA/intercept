@@ -9,6 +9,7 @@ import socket
 import subprocess
 import threading
 import time
+from collections import deque
 from contextlib import suppress
 from typing import Any
 
@@ -24,12 +25,15 @@ except ImportError:
     Sock = None
 
 from utils.logging import get_logger
-from utils.process import register_process, safe_terminate, unregister_process
+from utils.process import drain_in_background, register_process, safe_terminate, unregister_process
 from utils.sdr import SDRFactory, SDRType
 from utils.sdr.base import SDRCapabilities, SDRDevice
+from utils.sdr.device_config import apply_device_defaults
+from utils.validation import validate_ppm
 from utils.waterfall_fft import (
     build_binary_frame,
     compute_power_spectrum,
+    cs8_to_complex,
     cu8_to_complex,
     quantize_to_uint8,
 )
@@ -354,6 +358,49 @@ def _build_dummy_device(device_index: int, sdr_type: SDRType) -> SDRDevice:
     )
 
 
+_TUNE_CMDS = ("tune", "set_vfo")
+
+
+def _coalesce_commands(batch: list[dict]) -> list[dict]:
+    """Of the commands waiting on the socket, the ones still worth running.
+
+    A start restarts the SDR capture, which takes a second or more. Clicking
+    along the waterfall faster than that queued a start per click, and each
+    was run in turn, so the radio visited every frequency on the way to the
+    last. Only the latest intent matters: a start supersedes earlier starts
+    and tunes, a tune supersedes earlier tunes, and a stop supersedes
+    everything before it. Other commands keep their place.
+    """
+    kept: list[dict] = []
+    for command in batch:
+        cmd = command.get("cmd")
+        if cmd == "stop":
+            kept = [c for c in kept if c.get("cmd") not in ("start", "stop", *_TUNE_CMDS)]
+        elif cmd == "start":
+            kept = [c for c in kept if c.get("cmd") not in ("start", *_TUNE_CMDS)]
+        elif cmd in _TUNE_CMDS:
+            kept = [c for c in kept if c.get("cmd") not in _TUNE_CMDS]
+        kept.append(command)
+    return kept
+
+
+def _drain_waiting(ws, limit: int = 64) -> list[dict]:
+    """Commands already waiting on the socket, without blocking."""
+    waiting = []
+    for _ in range(limit):
+        try:
+            msg = ws.receive(timeout=0.001)
+        except Exception:
+            break
+        if msg is None:
+            break
+        with suppress(json.JSONDecodeError, TypeError):
+            data = json.loads(msg)
+            if isinstance(data, dict):
+                waiting.append(data)
+    return waiting
+
+
 def init_waterfall_websocket(app: Flask):
     """Initialize WebSocket waterfall streaming."""
     if not WEBSOCKET_AVAILABLE:
@@ -381,6 +428,8 @@ def init_waterfall_websocket(app: Flask):
         capture_end_freq = 0.0
         # Queue for outgoing messages — only the main loop touches ws.send()
         send_queue = queue.Queue(maxsize=120)
+        # Commands received but not yet run, already coalesced
+        pending: deque[dict] = deque()
 
         try:
             while True:
@@ -396,8 +445,18 @@ def init_waterfall_websocket(app: Flask):
                         stop_event.set()
                         break
 
+                if pending:
+                    # Clicks that arrived during the last restart are folded in too
+                    waiting = _drain_waiting(ws)
+                    if waiting:
+                        pending = deque(_coalesce_commands([*pending, *waiting]))
+                    data = pending.popleft()
+                    cmd = data.get("cmd")
+                    msg = None
+                else:
+                    cmd = None
                 try:
-                    msg = ws.receive(timeout=0.01)
+                    msg = None if cmd else ws.receive(timeout=0.01)
                 except Exception as e:
                     err = str(e).lower()
                     if "closed" in err:
@@ -406,21 +465,28 @@ def init_waterfall_websocket(app: Flask):
                         logger.error(f"WebSocket receive error: {e}")
                     continue
 
-                if msg is None:
-                    # simple-websocket returns None on timeout AND on
-                    # close; check ws.connected to tell them apart.
-                    if not ws.connected:
-                        break
-                    if stop_event.is_set():
-                        break
-                    continue
+                if cmd is None:
+                    if msg is None:
+                        # simple-websocket returns None on timeout AND on
+                        # close; check ws.connected to tell them apart.
+                        if not ws.connected:
+                            break
+                        if stop_event.is_set():
+                            break
+                        continue
 
-                try:
-                    data = json.loads(msg)
-                except (json.JSONDecodeError, TypeError):
-                    continue
+                    try:
+                        data = json.loads(msg)
+                    except (json.JSONDecodeError, TypeError):
+                        continue
+                    if not isinstance(data, dict):
+                        continue
 
-                cmd = data.get("cmd")
+                    # Anything else already sent (a burst of clicks) is folded in,
+                    # so the capture goes straight to the latest request.
+                    pending.extend(_coalesce_commands([data, *_drain_waiting(ws)]))
+                    data = pending.popleft()
+                    cmd = data.get("cmd")
 
                 if cmd == "start":
                     shared_before = get_shared_capture_status()
@@ -453,6 +519,8 @@ def init_waterfall_websocket(app: Flask):
                     if was_restarting:
                         time.sleep(0.5)
 
+                    data = apply_device_defaults(data)
+
                     # Parse config
                     try:
                         center_freq_mhz = _parse_center_freq_mhz(data)
@@ -475,7 +543,7 @@ def init_waterfall_websocket(app: Flask):
                         avg_count = int(data.get("avg_count", 4))
                         ppm = data.get("ppm")
                         if ppm is not None:
-                            ppm = int(ppm)
+                            ppm = validate_ppm(ppm)
                         bias_t = bool(data.get("bias_t", False))
                         db_min = data.get("db_min")
                         db_max = data.get("db_max")
@@ -573,6 +641,19 @@ def init_waterfall_websocket(app: Flask):
                         )
                         continue
 
+                    # Without SoapySDR (no rx_sdr), a HackRF can still stream
+                    # I/Q through hackrf_transfer, which outputs signed bytes
+                    to_complex = cu8_to_complex
+                    if sdr_type == SDRType.HACKRF and not shutil.which(iq_cmd[0]):
+                        iq_cmd = builder.build_hackrf_transfer_iq_command(
+                            device=device,
+                            frequency_mhz=center_freq_mhz,
+                            sample_rate=sample_rate,
+                            gain=gain,
+                            bias_t=bias_t,
+                        )
+                        to_complex = cs8_to_complex
+
                     # Pre-flight: check the capture binary exists
                     if not shutil.which(iq_cmd[0]):
                         app_module.release_sdr_device(device_index, sdr_type_str)
@@ -624,6 +705,8 @@ def init_waterfall_websocket(app: Flask):
                                     continue
                                 detail = f": {stderr_out}" if stderr_out else ""
                                 raise RuntimeError(f"I/Q capture process exited immediately{detail}")
+                            if iq_process.stderr:
+                                drain_in_background(iq_process.stderr)
                             break  # Process started successfully
                     except Exception as e:
                         logger.error(f"Failed to start I/Q capture: {e}")
@@ -694,6 +777,7 @@ def init_waterfall_websocket(app: Flask):
                         _center_mhz,
                         _db_min=None,
                         _db_max=None,
+                        _to_complex=cu8_to_complex,
                     ):
                         """Read I/Q from subprocess, compute FFT, enqueue binary frames."""
                         required_fft_samples = _fft_size * _avg_count
@@ -724,7 +808,7 @@ def init_waterfall_websocket(app: Flask):
                                     break
 
                                 # Process FFT pipeline
-                                samples = cu8_to_complex(raw)
+                                samples = _to_complex(raw)
                                 fft_samples = (
                                     samples[-required_fft_samples:] if len(samples) > required_fft_samples else samples
                                 )
@@ -796,6 +880,7 @@ def init_waterfall_websocket(app: Flask):
                             center_freq_mhz,
                             db_min,
                             db_max,
+                            to_complex,
                         ),
                         daemon=True,
                     )

@@ -40,31 +40,31 @@ SIGNAL_STRENGTH_DESCRIPTIONS = {
     SignalStrength.MINIMAL: {
         "label": "Minimal",
         "description": "At detection threshold",
-        "interpretation": "may be ambient noise or distant source",
+        "interpretation": "ambient noise or a distant source",
         "confidence": "low",
     },
     SignalStrength.WEAK: {
         "label": "Weak",
         "description": "Detectable signal",
-        "interpretation": "potentially distant or obstructed",
+        "interpretation": "a distant or obstructed source",
         "confidence": "low",
     },
     SignalStrength.MODERATE: {
         "label": "Moderate",
         "description": "Consistent presence",
-        "interpretation": "likely in proximity",
+        "interpretation": "a source in proximity",
         "confidence": "medium",
     },
     SignalStrength.STRONG: {
         "label": "Strong",
         "description": "Clear signal",
-        "interpretation": "probable close proximity",
+        "interpretation": "a source in close proximity",
         "confidence": "medium",
     },
     SignalStrength.VERY_STRONG: {
         "label": "Very Strong",
         "description": "High signal level",
-        "interpretation": "indicates likely nearby source",
+        "interpretation": "a nearby source",
         "confidence": "high",
     },
 }
@@ -148,7 +148,7 @@ DURATION_DESCRIPTIONS = {
     },
     DetectionDuration.SUSTAINED: {
         "label": "Sustained",
-        "modifier": "observed over sustained period",
+        "modifier": "observed over a sustained period",
         "confidence_impact": "supports confidence",
     },
     DetectionDuration.PERSISTENT: {
@@ -325,18 +325,17 @@ def _build_summary(
     strength_info = SIGNAL_STRENGTH_DESCRIPTIONS[strength]
     duration_info = DURATION_DESCRIPTIONS[duration]
 
+    # Labels are title case ("Very Strong"); mid-sentence they are not.
+    strength_label = strength_info["label"].capitalize()
     if confidence == ConfidenceLevel.HIGH:
         return (
-            f"{strength_info['label']}, {duration_info['label'].lower()} signal "
+            f"{strength_label}, {duration_info['label'].lower()} signal "
             f"with characteristics that suggest device presence in proximity"
         )
     elif confidence == ConfidenceLevel.MEDIUM:
-        return f"{strength_info['label']}, {duration_info['label'].lower()} signal that may indicate device activity"
+        return f"{strength_label}, {duration_info['label'].lower()} signal that may indicate device activity"
     else:
-        return (
-            f"{duration_info['modifier'].capitalize()} {strength_info['label'].lower()} signal "
-            f"consistent with possible device presence"
-        )
+        return f"{strength_label} signal, {duration_info['modifier']}, consistent with possible device presence"
 
 
 def _build_interpretation(
@@ -347,14 +346,14 @@ def _build_interpretation(
     """Build interpretation text with appropriate hedging."""
     strength_info = SIGNAL_STRENGTH_DESCRIPTIONS[strength]
 
-    base = strength_info["interpretation"]
+    base = strength_info["interpretation"]  # a noun phrase: "a nearby source"
 
     if confidence == ConfidenceLevel.HIGH:
         return f"Observed signal characteristics suggest {base}"
     elif confidence == ConfidenceLevel.MEDIUM:
         return f"Signal pattern may indicate {base}"
     else:
-        return f"Limited data; signal could represent {base} or environmental factors"
+        return f"Limited data; the signal could represent {base}, or environmental factors"
 
 
 def _build_caveats(
@@ -410,9 +409,6 @@ def describe_signal_for_report(
     """
     assessment = assess_signal(rssi, duration_seconds, observation_count)
 
-    # Estimate range (very approximate, with appropriate hedging)
-    range_estimate = _estimate_range(rssi)
-
     return {
         "headline": f"{assessment.strength_label} {protocol} signal, {assessment.duration_label.lower()}",
         "description": assessment.summary,
@@ -424,7 +420,6 @@ def describe_signal_for_report(
             "duration_category": assessment.detection_duration.value,
             "observations": observation_count,
         },
-        "range_estimate": range_estimate,
         "confidence": assessment.confidence.value,
         "confidence_factors": {
             "signal_strength": assessment.strength_label,
@@ -432,55 +427,6 @@ def describe_signal_for_report(
             "observation_count": observation_count,
         },
         "caveats": assessment.caveats,
-    }
-
-
-def _estimate_range(rssi: float | int | None) -> dict:
-    """
-    Estimate approximate range from RSSI with heavy caveats.
-
-    Returns range as min/max estimate with disclaimer.
-    """
-    if rssi is None:
-        return {
-            "estimate": "Unknown",
-            "disclaimer": "Insufficient signal data for range estimation",
-        }
-
-    try:
-        rssi_val = float(rssi)
-    except (ValueError, TypeError):
-        return {
-            "estimate": "Unknown",
-            "disclaimer": "Invalid signal data",
-        }
-
-    # Very rough estimates based on free-space path loss
-    # These are intentionally wide ranges due to environmental variability
-    if rssi_val > -40:
-        estimate = "< 3 meters"
-        range_min, range_max = 0, 3
-    elif rssi_val > -55:
-        estimate = "3-10 meters"
-        range_min, range_max = 3, 10
-    elif rssi_val > -70:
-        estimate = "5-20 meters"
-        range_min, range_max = 5, 20
-    elif rssi_val > -85:
-        estimate = "10-50 meters"
-        range_min, range_max = 10, 50
-    else:
-        estimate = "> 30 meters or heavily obstructed"
-        range_min, range_max = 30, None
-
-    return {
-        "estimate": estimate,
-        "range_min_meters": range_min,
-        "range_max_meters": range_max,
-        "disclaimer": (
-            "Range estimates are approximate and significantly affected by "
-            "walls, interference, antenna characteristics, and transmit power"
-        ),
     }
 
 

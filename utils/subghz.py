@@ -24,6 +24,7 @@ from typing import BinaryIO, Callable
 
 import numpy as np
 
+from utils import subghz_inspect
 from utils.constants import (
     SUBGHZ_LNA_GAIN_MAX,
     SUBGHZ_LNA_GAIN_MIN,
@@ -34,11 +35,19 @@ from utils.constants import (
     SUBGHZ_VGA_GAIN_MAX,
     SUBGHZ_VGA_GAIN_MIN,
 )
-from utils.dependencies import get_tool_path
+from utils.dependencies import get_tool_path, install_hint
 from utils.logging import get_logger
 from utils.process import register_process, safe_terminate, unregister_process
 
 logger = get_logger("intercept.subghz")
+
+# How often merged hackrf_sweep output is sent to the frequency analyzer
+SWEEP_EMIT_INTERVAL_S = 0.125
+
+
+def _tool_missing(tool: str) -> dict:
+    """A start result for a missing executable, named, with install advice."""
+    return {"status": "error", "error_type": "TOOL_MISSING", "message": f"{tool} not found. {install_hint(tool)}"}
 
 
 @dataclass
@@ -339,7 +348,7 @@ class SubGhzManager:
         # Pre-lock: tool availability & device detection (blocking I/O)
         hackrf_transfer_path = self._resolve_tool("hackrf_transfer")
         if not hackrf_transfer_path:
-            return {"status": "error", "message": "hackrf_transfer not found"}
+            return _tool_missing("hackrf_transfer")
         device_err = self._require_hackrf_device()
         if device_err:
             return {"status": "error", "message": device_err}
@@ -467,7 +476,7 @@ class SubGhzManager:
                 }
 
             except FileNotFoundError:
-                return {"status": "error", "message": "hackrf_transfer not found"}
+                return _tool_missing("hackrf_transfer")
             except Exception as e:
                 logger.error(f"Failed to start RX: {e}")
                 return {"status": "error", "message": str(e)}
@@ -1309,10 +1318,10 @@ class SubGhzManager:
         # Pre-lock: tool availability & device detection (blocking I/O)
         hackrf_transfer_path = self._resolve_tool("hackrf_transfer")
         if not hackrf_transfer_path:
-            return {"status": "error", "message": "hackrf_transfer not found"}
+            return _tool_missing("hackrf_transfer")
         rtl433_path = self._resolve_tool("rtl_433")
         if not rtl433_path:
-            return {"status": "error", "message": "rtl_433 not found"}
+            return _tool_missing("rtl_433")
         device_err = self._require_hackrf_device()
         if device_err:
             return {"status": "error", "message": device_err}
@@ -1550,7 +1559,7 @@ class SubGhzManager:
                     safe_terminate(self._decode_hackrf_process)
                     unregister_process(self._decode_hackrf_process)
                     self._decode_hackrf_process = None
-                return {"status": "error", "message": f"Tool not found: {e.filename or 'unknown'}"}
+                return _tool_missing(os.path.basename(str(e.filename or "hackrf_transfer")))
             except Exception as e:
                 for proc in (self._decode_hackrf_process, self._decode_process):
                     if proc:
@@ -2068,7 +2077,7 @@ class SubGhzManager:
         # Pre-lock: tool availability & device detection (blocking I/O)
         hackrf_transfer_path = self._resolve_tool("hackrf_transfer")
         if not hackrf_transfer_path:
-            return {"status": "error", "message": "hackrf_transfer not found"}
+            return _tool_missing("hackrf_transfer")
         device_err = self._require_hackrf_device()
         if device_err:
             return {"status": "error", "message": device_err}
@@ -2228,7 +2237,7 @@ class SubGhzManager:
 
             except FileNotFoundError:
                 self._cleanup_tx_temp_file()
-                return {"status": "error", "message": "hackrf_transfer not found"}
+                return _tool_missing("hackrf_transfer")
             except Exception as e:
                 self._cleanup_tx_temp_file()
                 logger.error(f"Failed to start TX: {e}")
@@ -2324,7 +2333,7 @@ class SubGhzManager:
         # Pre-lock: tool availability & device detection (blocking I/O)
         hackrf_sweep_path = self._resolve_tool("hackrf_sweep")
         if not hackrf_sweep_path:
-            return {"status": "error", "message": "hackrf_sweep not found"}
+            return _tool_missing("hackrf_sweep")
         device_err = self._require_hackrf_device()
         if device_err:
             return {"status": "error", "message": device_err}
@@ -2355,7 +2364,7 @@ class SubGhzManager:
                 self._sweep_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
                 register_process(self._sweep_process)
                 self._sweep_running = True
@@ -2385,23 +2394,49 @@ class SubGhzManager:
                 }
 
             except FileNotFoundError:
-                return {"status": "error", "message": "hackrf_sweep not found"}
+                return _tool_missing("hackrf_sweep")
             except Exception as e:
                 logger.error(f"Failed to start sweep: {e}")
                 return {"status": "error", "message": str(e)}
 
     def _sweep_loop(self, cmd: list[str]) -> None:
-        """Run hackrf_sweep with auto-restart on USB drops."""
+        """Run hackrf_sweep, auto-restarting on genuine USB drops but bailing
+        out (with the tool's real stderr) if it keeps exiting immediately."""
         RESTART_DELAY = 0.5
         MAX_RESTARTS = 600
+        MIN_RUNTIME = 3.0       # exits faster than this are treated as failures
+        MAX_QUICK_FAILS = 3     # give up after this many immediate exits
 
         restarts = 0
+        quick_fails = 0
         while self._sweep_running:
-            self._parse_sweep_stdout()
+            started = time.monotonic()
+            self._parse_sweep_stdout()  # blocks until the process exits
+            ran_for = time.monotonic() - started
 
             # Process exited — restart if allowed
             if not self._sweep_running:
                 break
+
+            # A run shorter than MIN_RUNTIME is a hard failure (bad args, device
+            # busy, unsupported range …), not a transient USB drop. Surface the
+            # real stderr and stop rather than hammering restarts for minutes.
+            if ran_for < MIN_RUNTIME:
+                quick_fails += 1
+            else:
+                quick_fails = 0
+
+            if quick_fails >= MAX_QUICK_FAILS:
+                stderr_text = ""
+                proc = self._sweep_process
+                if proc and proc.stderr:
+                    with contextlib.suppress(Exception):
+                        stderr_text = proc.stderr.read().decode("utf-8", errors="replace").strip()
+                msg = stderr_text or "hackrf_sweep kept exiting immediately (check the device is free and the frequency range is valid)"
+                logger.error(f"hackrf_sweep failing immediately: {msg}")
+                self._emit({"type": "error", "message": f"HackRF sweep failed: {msg[:300]}"})
+                break
+
             if restarts >= MAX_RESTARTS:
                 logger.error("hackrf_sweep: max restarts reached")
                 self._emit({"type": "error", "message": "HackRF sweep: max restarts reached"})
@@ -2415,7 +2450,7 @@ class SubGhzManager:
                 proc = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                 )
                 register_process(proc)
                 self._sweep_process = proc
@@ -2426,6 +2461,9 @@ class SubGhzManager:
                 break
 
         self._sweep_running = False
+        # The device may have dropped out from under the sweep; force the next
+        # /status check to re-probe instead of reporting a stale "connected".
+        self._hackrf_device_cache = None
         self._emit(
             {
                 "type": "status",
@@ -2443,6 +2481,8 @@ class SubGhzManager:
         process = self._sweep_process
         if not process or not process.stdout:
             return
+        pending: dict[float, float] = {}
+        last_emit = time.monotonic()
         try:
             for line in iter(process.stdout.readline, b""):
                 if not self._sweep_running:
@@ -2461,27 +2501,27 @@ class SubGhzManager:
                     if not powers or hz_bin_width <= 0:
                         continue
 
-                    points = []
                     for i, power in enumerate(powers):
-                        freq_hz = hz_low + i * hz_bin_width
-                        points.append(
-                            {
-                                "freq": round(freq_hz / 1_000_000, 4),
-                                "power": round(power, 1),
-                            }
-                        )
-
-                    self._emit(
-                        {
-                            "type": "sweep",
-                            "points": points,
-                        }
-                    )
+                        pending[round((hz_low + i * hz_bin_width) / 1_000_000, 4)] = round(power, 1)
                 except Exception as exc:
                     logger.debug(f"Skipping malformed sweep line: {exc}")
                     continue
+
+                # hackrf_sweep writes ~1,000 lines/s; one event per line floods
+                # the event pipeline and the browser, so send merged batches
+                now = time.monotonic()
+                if now - last_emit >= SWEEP_EMIT_INTERVAL_S:
+                    self._emit_sweep_points(pending)
+                    pending = {}
+                    last_emit = now
+            self._emit_sweep_points(pending)
         except Exception as e:
             logger.error(f"Error reading sweep output: {e}")
+
+    def _emit_sweep_points(self, pending: dict[float, float]) -> None:
+        if pending:
+            points = [{"freq": freq, "power": pending[freq]} for freq in sorted(pending)]
+            self._emit({"type": "sweep", "points": points})
 
     def stop_sweep(self) -> dict:
         proc_to_terminate: subprocess.Popen | None = None
@@ -2635,6 +2675,52 @@ class SubGhzManager:
         if path.exists():
             return path
         return None
+
+    def inspect_capture(self, capture_id: str, burst_index: int | None = None) -> dict:
+        """Pulse-level analysis of one burst of a capture (or its start, when it has no bursts)."""
+        capture = self._load_capture(capture_id)
+        if not capture:
+            return {"status": "error", "message": f"Capture not found: {capture_id}"}
+        path = self._captures_dir / capture.filename
+        if not path.exists():
+            return {"status": "error", "message": "IQ file missing"}
+        rtl_433_path = self._resolve_tool("rtl_433")
+        if not rtl_433_path:
+            return _tool_missing("rtl_433")
+
+        total = self._estimate_capture_duration_seconds(capture, path.stat().st_size)
+        bursts = [b for b in (capture.bursts or []) if isinstance(b, dict)]
+        if burst_index is None:
+            start, end = 0.0, total
+        elif 0 <= burst_index < len(bursts):
+            burst = bursts[burst_index]
+            burst_start = float(burst.get("start_seconds", 0.0) or 0.0)
+            burst_end = burst_start + float(burst.get("duration_seconds", 0.0) or 0.0)
+            start = max(0.0, burst_start - subghz_inspect.BURST_PAD_SECONDS)
+            end = min(total, burst_end + subghz_inspect.BURST_PAD_SECONDS)
+        else:
+            return {"status": "error", "message": f"Burst {burst_index} not found in this capture"}
+
+        truncated = end - start > subghz_inspect.MAX_WINDOW_SECONDS
+        if truncated:
+            end = start + subghz_inspect.MAX_WINDOW_SECONDS
+        try:
+            result = subghz_inspect.inspect_window(path, capture.sample_rate, start, end - start, rtl_433_path)
+        except subprocess.TimeoutExpired:
+            return {"status": "error", "message": "rtl_433 pulse analysis timed out"}
+        except OSError as e:
+            return {"status": "error", "message": f"Pulse analysis failed: {e}"}
+        if result.get("status") == "ok":
+            result.update(
+                {
+                    "capture_id": capture.capture_id,
+                    "frequency_hz": capture.frequency_hz,
+                    "burst_index": burst_index,
+                    "burst_count": len(bursts),
+                    "truncated": truncated,
+                }
+            )
+        return result
 
     def trim_capture(
         self,

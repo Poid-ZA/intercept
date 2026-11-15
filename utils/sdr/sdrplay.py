@@ -79,7 +79,13 @@ class SDRPlayCommandBuilder(CommandBuilder):
 
         return cmd
 
-    def build_adsb_command(self, device: SDRDevice, gain: float | None = None, bias_t: bool = False) -> list[str]:
+    def build_adsb_command(
+        self,
+        device: SDRDevice,
+        gain: float | None = None,
+        bias_t: bool = False,
+        ppm: int | None = None,
+    ) -> list[str]:
         """
         Build dump1090/readsb command with SoapySDR support for ADS-B decoding.
 
@@ -87,13 +93,23 @@ class SDRPlayCommandBuilder(CommandBuilder):
         """
         device_str = self._build_device_string(device)
 
-        cmd = ["readsb", "--net", "--device-type", "soapysdr", "--device", device_str, "--quiet"]
+        cmd = [
+            "readsb",
+            "--net",
+            "--net-sbs-port",
+            "30003",
+            "--device-type",
+            "soapysdr",
+            "--soapy-device",
+            device_str,
+            "--quiet",
+        ]
 
         if gain is not None:
             cmd.extend(["--gain", str(int(gain))])
 
         if bias_t:
-            cmd.extend(["--enable-bias-t"])
+            cmd.append("--enable-biastee")
 
         return cmd
 
@@ -130,6 +146,7 @@ class SDRPlayCommandBuilder(CommandBuilder):
         tcp_port: int = 10110,
         udp_host: str | None = None,
         udp_port: int | None = None,
+        ppm: int | None = None,
     ) -> list[str]:
         """
         Build AIS-catcher command for AIS vessel tracking with SDRPlay.

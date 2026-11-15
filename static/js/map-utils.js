@@ -243,6 +243,7 @@ const MapUtils = {
         // --- Graticule toggle control (always added; defaultVisible via options.graticule) ---
         const grat = this.addGraticuleControl(map, {
             defaultVisible: options.graticule !== false,
+            position: options.graticulePosition,  // a map with its own bottom-left panel moves it
         });
         handles.showGraticule = grat.show;
         handles.hideGraticule = grat.hide;
@@ -367,7 +368,7 @@ const MapUtils = {
             }
         };
         updateClock();
-        const clockInterval = setInterval(updateClock, 1000);
+        const clockInterval = VisibleInterval.set(updateClock, 1000);
 
         return {
             updateCount(n) {
@@ -377,7 +378,7 @@ const MapUtils = {
                 dotEl.className = `map-hud-dot ${online === true ? 'online' : online === false ? 'offline' : ''}`;
             },
             remove() {
-                clearInterval(clockInterval);
+                VisibleInterval.clear(clockInterval);
                 tl.remove();
                 tr.remove();
             },

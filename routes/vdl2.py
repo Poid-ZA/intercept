@@ -12,8 +12,7 @@ import shutil
 import subprocess
 import threading
 import time
-from datetime import datetime
-from typing import Any
+from datetime import datetime, timezone
 
 from flask import Blueprint, Response, jsonify, request
 
@@ -25,12 +24,12 @@ from utils.constants import (
     SSE_KEEPALIVE_INTERVAL,
     SSE_QUEUE_TIMEOUT,
 )
-from utils.event_pipeline import process_event
 from utils.flight_correlator import get_flight_correlator
 from utils.logging import sensor_logger as logger
 from utils.process import register_process, unregister_process
 from utils.responses import api_error
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import validate_device_index, validate_gain, validate_ppm
 
@@ -81,7 +80,7 @@ def stream_vdl2_output(process: subprocess.Popen, is_text_mode: bool = False) ->
 
                 # Add our metadata
                 data["type"] = "vdl2"
-                data["timestamp"] = datetime.utcnow().isoformat() + "Z"
+                data["timestamp"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
                 # Flatten nested VDL2 identifying fields to top level for correlator matching
                 # dumpvdl2 nests flight/reg inside vdl2.avlc.acars and ICAO in avlc.src.addr
@@ -211,6 +210,7 @@ def start_vdl2() -> Response:
         return api_error("dumpvdl2 not found. Install from: https://github.com/szpajder/dumpvdl2", 400)
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate inputs
     try:
@@ -290,8 +290,9 @@ def start_vdl2() -> Response:
             master_fd, slave_fd = pty.openpty()
             process = subprocess.Popen(cmd, stdout=slave_fd, stderr=subprocess.PIPE, start_new_session=True)
             os.close(slave_fd)
-            # Wrap master_fd as a text file for line-buffered reading
-            process.stdout = open(master_fd, buffering=1)
+            # Wrap master_fd as a text file for line-buffered reading; replace
+            # undecodable bytes like the pipe path does, so noise can't kill the reader
+            process.stdout = open(master_fd, buffering=1, encoding="utf-8", errors="replace")
             is_text_mode = True
         else:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True)
@@ -342,7 +343,7 @@ def stop_vdl2() -> Response:
 
     with app_module.vdl2_lock:
         if not app_module.vdl2_process:
-            return api_error("VDL2 decoder not running", 400)
+            return jsonify({"status": "not_running"})
 
         try:
             app_module.vdl2_process.terminate()
@@ -367,16 +368,12 @@ def stop_vdl2() -> Response:
 def stream_vdl2() -> Response:
     """SSE stream for VDL2 messages."""
 
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("vdl2", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.vdl2_queue,
             channel_key="vdl2",
             timeout=SSE_QUEUE_TIMEOUT,
             keepalive_interval=SSE_KEEPALIVE_INTERVAL,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

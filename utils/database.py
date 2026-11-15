@@ -248,6 +248,43 @@ def init_db() -> None:
             )
         """)
 
+        # Older databases predate watchlist alerts and push delivery status.
+        alert_event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(alert_events)")}
+        for column, ddl in (
+            ("watchlist_id", "INTEGER"),
+            ("ident", "TEXT"),
+            ("delivery", "TEXT"),
+        ):
+            if column not in alert_event_columns:
+                conn.execute(f"ALTER TABLE alert_events ADD COLUMN {column} {ddl}")
+
+        # Watchlists: plain lists of aircraft, vessels, callsigns, devices,
+        # frequencies or keywords to be alerted about (utils/watchlists.py)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS watchlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                entries TEXT NOT NULL DEFAULT '',
+                severity TEXT DEFAULT 'medium',
+                enabled BOOLEAN DEFAULT 1,
+                tolerance_khz REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Push channels for alerts: ntfy, Telegram, webhook (utils/alert_channels.py)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alert_channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                config TEXT NOT NULL DEFAULT '{}',
+                enabled BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Users table for authentication
         conn.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -255,9 +292,18 @@ def init_db() -> None:
                 username TEXT UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 role TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                must_change_password INTEGER NOT NULL DEFAULT 0
             )
         """)
+
+        # Older databases predate the forced-change flag.
+        try:
+            user_columns = {row["name"] for row in conn.execute("PRAGMA table_info(users)")}
+            if "must_change_password" not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0")
+        except Exception as e:
+            logger.debug(f"Schema update skipped for users: {e}")
 
         from config import ADMIN_PASSWORD, ADMIN_USERNAME
 
@@ -272,7 +318,9 @@ def init_db() -> None:
                 logger.warning(f"Generated admin password: {admin_password}")
                 logger.warning("Set INTERCEPT_ADMIN_PASSWORD env var to use a fixed password.")
                 try:
-                    pw_path = Path("instance/.initial_password")
+                    # Beside the database, not relative to the working
+                    # directory, which is wherever the process was started.
+                    pw_path = DB_DIR / ".initial_password"
                     pw_path.parent.mkdir(parents=True, exist_ok=True)
                     pw_path.write_text(f"{ADMIN_USERNAME}:{admin_password}\n")
                 except OSError as e:
@@ -281,14 +329,36 @@ def init_db() -> None:
             logger.info(f"Creating default admin user: {ADMIN_USERNAME}")
             hashed_pw = generate_password_hash(admin_password)
 
+            # A password the operator did not choose has to be changed before
+            # the UI is usable. An explicitly configured INTERCEPT_ADMIN_PASSWORD
+            # is the operator's own choice, so it does not force a change.
+            must_change = 1 if not ADMIN_PASSWORD else 0
             conn.execute(
                 """
-                INSERT INTO users (username, password_hash, role)
-                VALUES (?, ?, ?)
+                INSERT INTO users (username, password_hash, role, must_change_password)
+                VALUES (?, ?, ?, ?)
             """,
-                (ADMIN_USERNAME, hashed_pw, "admin"),
+                (ADMIN_USERNAME, hashed_pw, "admin", must_change),
             )
-        elif ADMIN_PASSWORD:
+        else:
+            # Existing install: flag the historical admin/admin default, which
+            # shipped as the fallback before this was removed.
+            row = conn.execute(
+                "SELECT password_hash FROM users WHERE username = ? AND role = ?",
+                (ADMIN_USERNAME, "admin"),
+            ).fetchone()
+            if row and check_password_hash(row["password_hash"], "admin"):
+                logger.warning(
+                    "SECURITY: the '%s' account still uses the default password 'admin'. "
+                    "A change is now required before the interface can be used.",
+                    ADMIN_USERNAME,
+                )
+                conn.execute(
+                    "UPDATE users SET must_change_password = 1 WHERE username = ? AND role = ?",
+                    (ADMIN_USERNAME, "admin"),
+                )
+
+        if ADMIN_PASSWORD:
             # Sync admin credentials from config on every startup so that
             # changes to config.py / env vars take effect without wiping the DB.
             row = conn.execute(
@@ -427,9 +497,25 @@ def init_db() -> None:
                 added_by TEXT,
                 last_verified TIMESTAMP,
                 score_modifier INTEGER DEFAULT -2,
-                metadata TEXT
+                metadata TEXT,
+                known_good INTEGER NOT NULL DEFAULT 1,
+                notes TEXT,
+                tags TEXT
             )
         """)
+
+        # Operator notes and tags share the row, but a device that only has a
+        # note is not known-good: known_good separates the two.
+        try:
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(tscm_known_devices)")}
+            if "known_good" not in columns:
+                conn.execute("ALTER TABLE tscm_known_devices ADD COLUMN known_good INTEGER NOT NULL DEFAULT 1")
+            if "notes" not in columns:
+                conn.execute("ALTER TABLE tscm_known_devices ADD COLUMN notes TEXT")
+            if "tags" not in columns:
+                conn.execute("ALTER TABLE tscm_known_devices ADD COLUMN tags TEXT")
+        except Exception as e:
+            logger.debug(f"Schema update skipped for tscm_known_devices: {e}")
 
         # TSCM Cases - Grouping sweeps, threats, and notes
         conn.execute("""
@@ -539,6 +625,28 @@ def init_db() -> None:
             ON tscm_known_devices(identifier)
         """)
 
+        # Observations: one sighting from any mode, for the activity feed.
+        # Bounded by rate limiting and a registered retention policy
+        # (utils/observations.py cleanup_old_observations).
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS observations (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts REAL NOT NULL,
+                source TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                entity TEXT,
+                rssi REAL,
+                lat REAL,
+                lon REAL,
+                summary TEXT,
+                raw TEXT
+            )
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_ts ON observations(ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_source_ts ON observations(source, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_identifier ON observations(identifier, ts)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_observations_entity ON observations(entity, ts)")
+
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_tscm_cases_status
             ON tscm_cases(status, created_at)
@@ -576,6 +684,42 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_dsc_alerts_mmsi
             ON dsc_alerts(source_mmsi, received_at)
         """)
+
+        # Meshtastic messages received from the mesh, kept so history survives
+        # reconnects and restarts (the device itself does not hand history back)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meshtastic_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                packet_id INTEGER,
+                received_at REAL NOT NULL,
+                from_id TEXT,
+                from_name TEXT,
+                to_id TEXT,
+                to_name TEXT,
+                message TEXT,
+                portnum TEXT,
+                channel INTEGER,
+                rssi INTEGER,
+                snr REAL,
+                hop_limit INTEGER
+            )
+        """)
+
+        # A packet heard again (mesh rebroadcast, Store & Forward replay) is stored once
+        conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_meshtastic_messages_packet
+            ON meshtastic_messages(from_id, packet_id)
+            WHERE packet_id IS NOT NULL
+        """)
+
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_meshtastic_messages_time
+            ON meshtastic_messages(received_at)
+        """)
+
+        mesh_msg_columns = {row["name"] for row in conn.execute("PRAGMA table_info(meshtastic_messages)")}
+        if "reply_id" not in mesh_msg_columns:
+            conn.execute("ALTER TABLE meshtastic_messages ADD COLUMN reply_id INTEGER")
 
         # =====================================================================
         # Remote Agent Tables (for distributed/controller mode)
@@ -1277,6 +1421,49 @@ def get_tscm_sweep(sweep_id: int) -> dict | None:
         }
 
 
+def get_tscm_sweeps(limit: int = 50) -> list[dict]:
+    """Recent TSCM sweeps, newest first, summarised: what each detected,
+    not the full device lists (a sweep's results can be large)."""
+    with get_db() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, baseline_id, started_at, completed_at, status, sweep_type, threats_found, results
+            FROM tscm_sweeps ORDER BY id DESC LIMIT ?
+        """,
+            (limit,),
+        ).fetchall()
+
+    def count(results: dict, key: str, *lists: str) -> int:
+        if results.get(key) is not None:
+            return results[key]
+        return next((len(results[name]) for name in lists if isinstance(results.get(name), list)), 0)
+
+    sweeps = []
+    for row in rows:
+        results = json.loads(row["results"]) if row["results"] else None
+        sweeps.append(
+            {
+                "id": row["id"],
+                "baseline_id": row["baseline_id"],
+                "started_at": row["started_at"],
+                "completed_at": row["completed_at"],
+                "status": row["status"],
+                "sweep_type": row["sweep_type"],
+                "threats_found": row["threats_found"],
+                "has_results": results is not None,
+                "detected": None
+                if results is None
+                else {
+                    "wifi": count(results, "wifi_count", "wifi_devices", "wifi"),
+                    "wifi_clients": count(results, "wifi_client_count", "wifi_clients"),
+                    "bluetooth": count(results, "bt_count", "bt_devices", "bluetooth"),
+                    "rf": count(results, "rf_count", "rf_signals", "rf"),
+                },
+            }
+        )
+    return sweeps
+
+
 def add_tscm_threat(
     sweep_id: int,
     threat_type: str,
@@ -1508,8 +1695,8 @@ def add_known_device(
         cursor = conn.execute(
             """
             INSERT INTO tscm_known_devices
-            (identifier, protocol, name, description, location, scope, added_by, score_modifier, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (identifier, protocol, name, description, location, scope, added_by, score_modifier, metadata, known_good)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(identifier) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -1517,6 +1704,7 @@ def add_known_device(
                 scope = excluded.scope,
                 score_modifier = excluded.score_modifier,
                 metadata = excluded.metadata,
+                known_good = 1,
                 last_verified = CURRENT_TIMESTAMP
         """,
             (
@@ -1537,7 +1725,9 @@ def add_known_device(
 def get_known_device(identifier: str) -> dict | None:
     """Get a known device by identifier."""
     with get_db() as conn:
-        cursor = conn.execute("SELECT * FROM tscm_known_devices WHERE identifier = ?", (identifier.upper(),))
+        cursor = conn.execute(
+            "SELECT * FROM tscm_known_devices WHERE identifier = ? AND known_good = 1", (identifier.upper(),)
+        )
         row = cursor.fetchone()
         if not row:
             return None
@@ -1554,6 +1744,8 @@ def get_known_device(identifier: str) -> dict | None:
             "last_verified": row["last_verified"],
             "score_modifier": row["score_modifier"],
             "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+            "notes": row["notes"],
+            "tags": json.loads(row["tags"]) if row["tags"] else [],
         }
 
 
@@ -1569,7 +1761,8 @@ def get_all_known_devices(location: str | None = None, scope: str | None = None)
         conditions.append("scope = ?")
         params.append(scope)
 
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    conditions.append("known_good = 1")  # a row may hold only an operator's note
+    where_clause = f"WHERE {' AND '.join(conditions)}"
 
     with get_db() as conn:
         cursor = conn.execute(
@@ -1595,16 +1788,65 @@ def get_all_known_devices(location: str | None = None, scope: str | None = None)
                 "last_verified": row["last_verified"],
                 "score_modifier": row["score_modifier"],
                 "metadata": json.loads(row["metadata"]) if row["metadata"] else None,
+                "notes": row["notes"],
+                "tags": json.loads(row["tags"]) if row["tags"] else [],
             }
             for row in cursor
         ]
 
 
 def delete_known_device(identifier: str) -> bool:
-    """Remove a device from the known-good registry."""
+    """Remove a device from the known-good registry, keeping any operator notes."""
     with get_db() as conn:
-        cursor = conn.execute("DELETE FROM tscm_known_devices WHERE identifier = ?", (identifier.upper(),))
+        cursor = conn.execute(
+            "UPDATE tscm_known_devices SET known_good = 0 WHERE identifier = ? AND known_good = 1",
+            (identifier.upper(),),
+        )
+        conn.execute(
+            "DELETE FROM tscm_known_devices WHERE identifier = ? AND known_good = 0 AND notes IS NULL AND tags IS NULL",
+            (identifier.upper(),),
+        )
         return cursor.rowcount > 0
+
+
+def set_device_annotation(identifier: str, protocol: str, notes: str | None, tags: list[str] | None) -> dict:
+    """Set an operator's note and tags on a device, whatever it is.
+
+    Shares the known-devices row without making the device known-good. With
+    neither a note nor tags left, a row that is not known-good is removed.
+    """
+    notes = notes or None
+    tags_json = json.dumps(tags) if tags else None
+    with get_db() as conn:
+        conn.execute(
+            """
+            INSERT INTO tscm_known_devices (identifier, protocol, known_good, notes, tags)
+            VALUES (?, ?, 0, ?, ?)
+            ON CONFLICT(identifier) DO UPDATE SET notes = excluded.notes, tags = excluded.tags
+        """,
+            (identifier.upper(), protocol, notes, tags_json),
+        )
+        conn.execute(
+            "DELETE FROM tscm_known_devices WHERE identifier = ? AND known_good = 0 AND notes IS NULL AND tags IS NULL",
+            (identifier.upper(),),
+        )
+    return {"identifier": identifier.upper(), "protocol": protocol, "notes": notes, "tags": tags or []}
+
+
+def get_device_annotations() -> dict[str, dict]:
+    """Every device an operator has noted or tagged, by identifier."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "SELECT identifier, protocol, notes, tags FROM tscm_known_devices WHERE notes IS NOT NULL OR tags IS NOT NULL"
+        )
+        return {
+            row["identifier"]: {
+                "protocol": row["protocol"],
+                "notes": row["notes"],
+                "tags": json.loads(row["tags"]) if row["tags"] else [],
+            }
+            for row in cursor
+        }
 
 
 # =============================================================================
@@ -1715,12 +1957,14 @@ def is_known_good_device(identifier: str, location: str | None = None) -> dict |
             cursor = conn.execute(
                 """
                 SELECT * FROM tscm_known_devices
-                WHERE identifier = ? AND (location = ? OR scope = 'global')
+                WHERE identifier = ? AND known_good = 1 AND (location = ? OR scope = 'global')
             """,
                 (identifier.upper(), location),
             )
         else:
-            cursor = conn.execute("SELECT * FROM tscm_known_devices WHERE identifier = ?", (identifier.upper(),))
+            cursor = conn.execute(
+                "SELECT * FROM tscm_known_devices WHERE identifier = ? AND known_good = 1", (identifier.upper(),)
+            )
         row = cursor.fetchone()
         if not row:
             return None
@@ -2238,6 +2482,99 @@ def cleanup_old_dsc_alerts(max_age_days: int = 30) -> int:
 
 
 # =============================================================================
+# Meshtastic Message History
+# =============================================================================
+
+_MESHTASTIC_MESSAGE_FIELDS = (
+    "packet_id",
+    "received_at",
+    "from_id",
+    "from_name",
+    "to_id",
+    "to_name",
+    "message",
+    "portnum",
+    "channel",
+    "rssi",
+    "snr",
+    "hop_limit",
+    "reply_id",
+)
+
+
+def store_meshtastic_message(msg: dict) -> bool:
+    """Store a received message (the dict from MeshtasticMessage.to_dict()).
+
+    Returns False when the same packet from the same node is already stored.
+    """
+    values = (
+        msg.get("packet_id"),
+        msg.get("timestamp"),
+        msg.get("from"),
+        msg.get("from_name"),
+        msg.get("to"),
+        msg.get("to_name"),
+        msg.get("message"),
+        msg.get("portnum"),
+        msg.get("channel"),
+        msg.get("rssi"),
+        msg.get("snr"),
+        msg.get("hop_limit"),
+        msg.get("reply_id"),
+    )
+    with get_db() as conn:
+        cursor = conn.execute(
+            f"INSERT OR IGNORE INTO meshtastic_messages ({', '.join(_MESHTASTIC_MESSAGE_FIELDS)}) "
+            f"VALUES ({', '.join('?' * len(_MESHTASTIC_MESSAGE_FIELDS))})",
+            values,
+        )
+        return cursor.rowcount == 1
+
+
+def get_meshtastic_messages(limit: int = 500, channel: int | None = None) -> list[dict]:
+    """Most recent stored messages, oldest first, shaped like MeshtasticMessage.to_dict()."""
+    query = f"SELECT {', '.join(_MESHTASTIC_MESSAGE_FIELDS)} FROM meshtastic_messages"
+    params: list = []
+    if channel is not None:
+        query += " WHERE channel = ?"
+        params.append(channel)
+    query += " ORDER BY received_at DESC, id DESC LIMIT ?"
+    params.append(limit)
+    with get_db() as conn:
+        rows = conn.execute(query, params).fetchall()
+    return [
+        {
+            "type": "meshtastic",
+            "packet_id": row["packet_id"],
+            "from": row["from_id"],
+            "from_name": row["from_name"],
+            "to": row["to_id"],
+            "to_name": row["to_name"],
+            "message": row["message"],
+            "text": row["message"],
+            "portnum": row["portnum"],
+            "channel": row["channel"],
+            "rssi": row["rssi"],
+            "snr": row["snr"],
+            "hop_limit": row["hop_limit"],
+            "reply_id": row["reply_id"],
+            "timestamp": row["received_at"],
+        }
+        for row in reversed(rows)
+    ]
+
+
+def cleanup_old_meshtastic_messages(max_age_days: int = 90) -> int:
+    """Delete stored Meshtastic messages older than max_age_days."""
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM meshtastic_messages WHERE received_at < strftime('%s', 'now') - ?",
+            (max_age_days * 86400,),
+        )
+        return cursor.rowcount
+
+
+# =============================================================================
 # Remote Agent Functions (for distributed/controller mode)
 # =============================================================================
 
@@ -2297,6 +2634,43 @@ def get_agent_by_name(name: str) -> dict | None:
         return _row_to_agent(row)
 
 
+def user_must_change_password(username: str) -> bool:
+    """Whether this account is required to set a new password before use."""
+    with get_db() as conn:
+        cursor = conn.execute("SELECT must_change_password FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        return bool(row["must_change_password"]) if row else False
+
+
+def set_user_password(username: str, new_password: str) -> bool:
+    """Set a user's password and clear the forced-change flag.
+
+    Returns False when the user does not exist.
+    """
+    with get_db() as conn:
+        cursor = conn.execute(
+            "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE username = ?",
+            (generate_password_hash(new_password), username),
+        )
+        return cursor.rowcount > 0
+
+
+def verify_user_password(username: str, password: str) -> bool:
+    """Check a password against the stored hash."""
+    with get_db() as conn:
+        cursor = conn.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+        row = cursor.fetchone()
+        return bool(row) and check_password_hash(row["password_hash"], password)
+
+
+def get_agent_api_key(agent_id: int) -> str | None:
+    """Return an agent's API key. Never put the result in an API response."""
+    with get_db() as conn:
+        cursor = conn.execute("SELECT api_key FROM agents WHERE id = ?", (agent_id,))
+        row = cursor.fetchone()
+        return row["api_key"] if row else None
+
+
 def _row_to_agent(row) -> dict:
     """Convert database row to agent dict."""
     return {
@@ -2304,7 +2678,10 @@ def _row_to_agent(row) -> dict:
         "name": row["name"],
         "base_url": row["base_url"],
         "description": row["description"],
-        "api_key": row["api_key"],
+        # The key itself is deliberately NOT serialised: agent dicts are
+        # returned to browsers by the controller API. Internal callers that
+        # need the secret fetch it with get_agent_api_key().
+        "has_api_key": bool(row["api_key"]),
         "capabilities": json.loads(row["capabilities"]) if row["capabilities"] else None,
         "interfaces": json.loads(row["interfaces"]) if row["interfaces"] else None,
         "gps_coords": json.loads(row["gps_coords"]) if row["gps_coords"] else None,

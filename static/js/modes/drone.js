@@ -40,16 +40,38 @@ var DroneMode = (function () {
         if (_map) return;
         var mapEl = document.getElementById('droneMainMap');
         if (!mapEl || typeof L === 'undefined') return;
-        _map = L.map('droneMainMap', { zoomControl: true }).setView([20, 0], 2);
-        if (typeof Settings !== 'undefined' && Settings.createTileLayer) {
+        // Open on the observer, not the whole world: contacts are local.
+        // 0,0 is the unset default (DEFAULT_LAT/LON), not a place to look.
+        var home = typeof ObserverLocation !== 'undefined' && ObserverLocation.getShared ? ObserverLocation.getShared() : null;
+        if (home && home.lat === 0 && home.lon === 0) home = null;
+        _map = L.map('droneMainMap', { zoomControl: true }).setView(home ? [home.lat, home.lon] : [20, 0], home ? 12 : 2);
+
+        var hasSettings = typeof Settings !== 'undefined' && Settings.createTileLayer;
+        if (hasSettings && Settings._initialized) {
+            // Settings already loaded elsewhere this session — use it directly so a
+            // configured CARTO API key is applied immediately (no unkeyed flash).
             Settings.createTileLayer().addTo(_map);
             Settings.registerMap(_map);
         } else {
-            L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+            var fallbackTiles = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
                 attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
                 maxZoom: 19,
             }).addTo(_map);
+
+            if (hasSettings) {
+                Promise.race([
+                    Settings.init(),
+                    new Promise(function (_, reject) { setTimeout(function () { reject(new Error('Settings timeout')); }, 5000); })
+                ]).then(function () {
+                    _map.removeLayer(fallbackTiles);
+                    Settings.createTileLayer().addTo(_map);
+                    Settings.registerMap(_map);
+                }).catch(function (e) {
+                    console.warn('Drone: Settings init failed/timed out, using fallback tiles:', e);
+                });
+            }
         }
+
         if (typeof MapUtils !== 'undefined') MapUtils.addGraticuleControl(_map);
     }
 
@@ -81,9 +103,7 @@ var DroneMode = (function () {
 
     function _upsertCard(contact) {
         var listEl = document.getElementById('droneContactList');
-        var emptyEl = document.getElementById('droneContactEmpty');
         if (!listEl) return;
-        if (emptyEl) emptyEl.style.display = 'none';
         var card = document.getElementById('drone-card-' + contact.id);
         if (!card) {
             card = document.createElement('div');
@@ -130,6 +150,8 @@ var DroneMode = (function () {
             _markers[contact.id] = L.marker([lat, lon], { icon: icon })
                 .addTo(_map)
                 .bindPopup('<b>' + (contact.serial_number || contact.id) + '</b><br>Risk: ' + contact.risk_level);
+            var waiting = document.getElementById('droneMapWaiting');
+            if (waiting) waiting.hidden = true;
         }
         var trailPoints = (contact.position_history || []).map(function (p) {
             return [p.lat, p.lon];
@@ -189,9 +211,27 @@ var DroneMode = (function () {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ wifi_iface: iface, rtl_sdr_index: rtlIndex, use_hackrf: useHackrf }),
         })
-        .then(function (r) { return r.json(); })
-        .then(function () { _setRunningUI(true); _refreshStatus(); })
-        .catch(function () {});
+        .then(function (r) { return r.json().then(function (data) { return { ok: r.ok, data: data }; }); })
+        .then(function (res) {
+            var data = res.data || {};
+            var unavailable = data.unavailable || [];
+            if (!res.ok) {
+                _showStartNote(data.message || data.error || 'Drone detection failed to start');
+                return;
+            }
+            _showStartNote(unavailable.length ? 'Started without ' + unavailable.join('; ') : '');
+            _setRunningUI(true);
+            _refreshStatus();
+        })
+        .catch(function (err) { _showStartNote('Drone detection failed to start: ' + err.message); });
+    }
+
+    /** Why a start failed, or which sources did not start; text only. */
+    function _showStartNote(text) {
+        var el = document.getElementById('droneDeviceWarnings');
+        if (!el) return;
+        el.textContent = text;
+        el.style.display = text ? 'block' : 'none';
     }
 
     function _stop() {

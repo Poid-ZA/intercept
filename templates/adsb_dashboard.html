@@ -1,6 +1,10 @@
 <!DOCTYPE html>
 <html lang="en" class="{% if offline_settings.tile_provider in ['cartodb_dark', 'cartodb_dark_cyan'] %}map-cyber-enabled{% endif %}">
 <head>
+    <script src="{{ url_for('static', filename='js/core/visible-interval.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/copy-id.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/device-notes.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/live-empty-state.js') }}"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AIRCRAFT RADAR // INTERCEPT - See the Invisible</title>
@@ -11,11 +15,19 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
     <!-- Core CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/variables.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/components/ux-platform.css') }}">
+    <!-- Toasts top right here: the bottom holds the tracking controls -->
+    <style>
+        .app-toast-stack { top: 156px; bottom: auto; }
+        /* On a phone the top of the page is the map; pop-ups go to the bottom */
+        @media (max-width: 767px) { .app-toast-stack { top: auto; bottom: 12px; } }
+    </style>
     <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/map-utils.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}&r=maptheme17">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-shell.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/adsb_dashboard.css') }}">
     <!-- Deferred scripts -->
     <script>
@@ -25,6 +37,9 @@
         window.INTERCEPT_DEFAULT_LON = {{ default_longitude | tojson }};
     </script>
     <script src="{{ url_for('static', filename='js/core/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/track-icons.js') }}"></script>
+    <!-- Toasts only: the global error handlers stay on the main page -->
+    <script src="{{ url_for('static', filename='js/core/ui-feedback.js') }}" data-global-handlers="off"></script>
     <script defer src="{{ url_for('static', filename='vendor/leaflet/leaflet.js') }}"></script>
     <script defer src="{{ url_for('static', filename='js/core/observer-location.js') }}"></script>
 </head>
@@ -116,6 +131,14 @@
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
                 Lookup
             </button>
+            <button type="button" class="strip-btn" onclick="tuneNearestAtc()" title="Tune the airband receiver to the nearest airport's ATC frequency for the selected aircraft" id="tuneAtcBtn" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12h4M18 12h4M12 2v4M12 18v4"/><circle cx="12" cy="12" r="4"/></svg>
+                Tune ATC
+            </button>
+            <button type="button" class="strip-btn" onclick="openInstruments()" title="Open a pop-out instrument panel for the selected aircraft" id="instrumentsBtn" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 12l4-3"/><circle cx="12" cy="12" r="1.5"/></svg>
+                Instruments
+            </button>
             <button type="button" class="strip-btn primary" onclick="generateReport()" title="Generate Session Report">
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
                 Report
@@ -156,6 +179,9 @@
                             <span style="color: var(--accent-yellow);">⚠</span> Requires separate SDR (VHF ~131 MHz)
                         </div>
                         <div class="acars-controls" style="padding: 8px; border-bottom: 1px solid var(--border-color);">
+                            <select id="acarsSourceSelect" title="Where ACARS runs: with ADS-B, on this machine, or on an agent" aria-label="ACARS source" onfocus="fillPanelSourceSelect(this)" onchange="onPanelSourceChange('acars')" style="width: 100%; font-size: 10px; margin-bottom: 5px;">
+                                <option value="">Source: same as ADS-B</option>
+                            </select>
                             <div style="display: flex; gap: 5px; margin-bottom: 5px;">
                                 <select id="acarsDeviceSelect" style="flex: 1; font-size: 10px;">
                                     <option value="0">SDR 0</option>
@@ -211,6 +237,9 @@
                             <span style="color: var(--accent-yellow);">&#9888;</span> Requires separate SDR (VHF ~137 MHz)
                         </div>
                         <div class="vdl2-controls" style="padding: 8px; border-bottom: 1px solid var(--border-color);">
+                            <select id="vdl2SourceSelect" title="Where VDL2 runs: with ADS-B, on this machine, or on an agent" aria-label="VDL2 source" onfocus="fillPanelSourceSelect(this)" onchange="onPanelSourceChange('vdl2')" style="width: 100%; font-size: 10px; margin-bottom: 5px;">
+                                <option value="">Source: same as ADS-B</option>
+                            </select>
                             <div style="display: flex; gap: 5px; margin-bottom: 5px;">
                                 <select id="vdl2DeviceSelect" style="flex: 1; font-size: 10px;">
                                     <option value="0">SDR 0</option>
@@ -301,6 +330,9 @@
                 <div class="control-group-items">
                     <label title="Show aircraft trails"><input type="checkbox" id="showTrails" checked onchange="toggleTrails()"> Trails</label>
                     <label title="Show range rings"><input type="checkbox" id="showRangeRings" checked onchange="drawRangeRings()"> Rings</label>
+                    <label title="Callsign and flight level beside each aircraft, when zoomed in"><input type="checkbox" id="showLabels" checked onchange="setMapLabels(this.checked)"> Labels</label>
+                    <label title="Outline of the furthest contact heard in each direction"><input type="checkbox" id="showReach" checked onchange="receptionOutline && receptionOutline.setVisible(this.checked)"> Reach</label>
+                    <button type="button" class="reach-reset" title="Forget the reception outline for this location" onclick="receptionOutline && receptionOutline.reset()">&#8634;</button>
                     <label title="Audio alerts for military/emergency"><input type="checkbox" id="alertToggle" checked onchange="toggleAlerts()"> Alerts</label>
                     <label title="Sound when new aircraft detected"><input type="checkbox" id="detectionSoundToggle" onchange="toggleDetectionSound()"> Ping</label>
                     <select id="aircraftFilter" onchange="applyFilter()" title="Filter aircraft">
@@ -316,6 +348,15 @@
                         <option value="100">100nm</option>
                         <option value="200">200nm</option>
                         <option value="300">300nm</option>
+                    </select>
+                    <label title="Only show aircraft within the range distance above (useful for busy remote/aggregated feeds)"><input type="checkbox" id="limitRange" onchange="toggleRangeLimit()"> In range</label>
+                    <select id="retentionSelect" onchange="setRetention()" title="Drop aircraft not heard from for this long">
+                        <option value="30000">Keep 30s</option>
+                        <option value="60000" selected>Keep 1m</option>
+                        <option value="120000">Keep 2m</option>
+                        <option value="300000">Keep 5m</option>
+                        <option value="600000">Keep 10m</option>
+                        <option value="900000">Keep 15m</option>
                     </select>
                 </div>
             </div>
@@ -350,10 +391,18 @@
                 </div>
             </div>
 
-            <!-- Airband Listening Group -->
+            <!-- Airband Listening Group (compact chip + popover) -->
             <div class="control-group airband-group">
-                <span class="control-group-label">AIRBAND</span>
-                <div class="control-group-items">
+                <button type="button" class="airband-chip" id="airbandChip" onclick="toggleAirbandPanel()" aria-expanded="false" title="Airband receiver">
+                    <span class="airband-chip-dot" id="airbandChipDot"></span>
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 14v-2a9 9 0 0 1 18 0v2"/><path d="M21 16a2 2 0 0 1-2 2h-1v-6h1a2 2 0 0 1 2 2z"/><path d="M3 16a2 2 0 0 0 2 2h1v-6H5a2 2 0 0 0-2 2z"/></svg>
+                    <span class="airband-chip-label">Airband</span>
+                    <span class="airband-chip-freq" id="airbandChipFreq">121.5</span>
+                    <svg class="airband-chip-caret" width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>
+                </button>
+                <div class="airband-panel" id="airbandPanel" hidden>
+                    <div class="airband-panel-title">AIRBAND RECEIVER</div>
+                    <div class="control-group-items">
                     <select id="airbandFreqSelect" onchange="updateAirbandFreq()" class="airband-controls" title="Airband frequency">
                         <option value="121.5">121.5 Guard</option>
                         <option value="118.0">118.0</option>
@@ -391,6 +440,7 @@
                         </div>
                         <canvas id="airbandSpectrumCanvas" width="80" height="20"></canvas>
                     </div>
+                    </div>
                 </div>
             </div>
             <audio id="airbandPlayer" style="display: none;"></audio>
@@ -422,6 +472,22 @@
         // STATE
         // ============================================
         let radarMap = null;
+        let receptionOutline = null;  // components/reception-outline.js
+        let headingLines = null;       // components/track-icons.js
+        let mapLabels = null;          // components/track-icons.js
+        const LABELS_KEY = 'intercept.map.labels';
+
+        // "BAW123 FL350", or GND on the ground
+        function aircraftLabel(ac) {
+            const name = (ac.callsign || '').trim() || ac.icao;
+            if (ac.on_ground === true) return `${name} GND`;
+            return ac.altitude ? `${name} FL${String(Math.round(ac.altitude / 100)).padStart(3, '0')}` : name;
+        }
+
+        function setMapLabels(on) {
+            try { localStorage.setItem(LABELS_KEY, on ? '1' : '0'); } catch (e) { /* this visit only */ }
+            if (mapLabels) mapLabels.setEnabled(on);
+        }
         let mapOverlays = null;
         let aircraft = {};
         let markers = {};
@@ -430,6 +496,7 @@
         let agentPollTimer = null;  // Polling fallback for agent mode
         let isTracking = false;
         let isTrackingStarting = false;
+        let isTrackingStopping = false;
         let currentFilter = 'all';
         // ICAO -> { emergency: bool, watchlist: bool, military: bool }
         let alertedAircraft = {};
@@ -464,6 +531,8 @@
         const MAX_TRAIL_POINTS = 100;
 
         let maxRange = 50;  // nautical miles
+        let limitToRange = false;        // only display aircraft within maxRange of the observer
+        let aircraftRetentionMs = 60000; // drop aircraft not heard from for this long
 
         // Statistics
         let stats = {
@@ -750,21 +819,17 @@
             }
         }
 
-        function showAlertBanner(message, color) {
-            const banner = document.createElement('div');
-            banner.style.cssText = `
-                position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
-                background: ${color}; color: white; padding: 10px 20px; border-radius: 6px;
-                font-weight: bold; font-size: 13px; z-index: 10000;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.5); animation: slideDown 0.3s ease-out;
-            `;
-            banner.textContent = message;
-            document.body.appendChild(banner);
-            setTimeout(() => {
-                banner.style.opacity = '0';
-                banner.style.transition = 'opacity 0.3s';
-                setTimeout(() => banner.remove(), 300);
-            }, 5000);
+        function showAlertBanner(message) {
+            // Emergencies as errors, confirmations as notices, the rest as warnings
+            const emergency = /^EMERGENCY/.test(message);
+            const notice = /^Added /.test(message);
+            AppFeedback.toast({
+                type: emergency ? 'error' : notice ? 'info' : 'warning',
+                title: emergency ? 'Emergency squawk' : notice ? 'Watchlist' : 'Aircraft alert',
+                message,
+                durationMs: emergency ? 0 : 8000,
+                actions: emergency ? [{ label: 'Dismiss' }] : [],
+            });
         }
 
         function toggleAlerts() {
@@ -1072,6 +1137,7 @@
                 if (distance > stats.maxRange) {
                     stats.maxRange = distance;
                 }
+                if (receptionOutline) receptionOutline.add(ac.lat, ac.lon);
             }
 
             // Message rate
@@ -1148,8 +1214,8 @@
                 stats.sessionStart = Date.now();
                 sessionLog.startTime = new Date().toISOString();
             }
-            if (sessionTimerInterval) clearInterval(sessionTimerInterval);
-            sessionTimerInterval = setInterval(updateSessionTimer, 1000);
+            if (sessionTimerInterval) VisibleInterval.clear(sessionTimerInterval);
+            sessionTimerInterval = VisibleInterval.set(updateSessionTimer, 1000);
         }
 
         function stopSessionTimer() {
@@ -1367,6 +1433,35 @@ ACARS: ${r.statistics.acarsMessages} messages`;
                 btn.disabled = true;
                 btn.title = 'Select an aircraft first';
             }
+
+            // "Tune ATC" needs a selected aircraft with a position
+            const atcBtn = document.getElementById('tuneAtcBtn');
+            if (atcBtn) {
+                const ac = selectedIcao ? aircraft[selectedIcao] : null;
+                const hasPos = ac && ac.lat !== undefined && ac.lat !== null && ac.lon !== undefined && ac.lon !== null;
+                atcBtn.disabled = !hasPos;
+                atcBtn.title = hasPos
+                    ? "Tune the airband receiver to the nearest airport's ATC frequency"
+                    : 'Select an aircraft with a position first';
+            }
+
+            // "Instruments" needs a selected aircraft
+            const instBtn = document.getElementById('instrumentsBtn');
+            if (instBtn) {
+                instBtn.disabled = !(selectedIcao && aircraft[selectedIcao]);
+                instBtn.title = instBtn.disabled
+                    ? 'Select an aircraft first'
+                    : 'Open a pop-out instrument panel for the selected aircraft';
+            }
+        }
+
+        function openInstruments() {
+            if (!selectedIcao) return;
+            window.open(
+                '/adsb/instruments?icao=' + encodeURIComponent(selectedIcao),
+                'instruments_' + selectedIcao,
+                'width=780,height=680,menubar=no,toolbar=no,location=no,status=no'
+            );
         }
 
         // ============================================
@@ -1472,6 +1567,21 @@ ACARS: ${r.statistics.acarsMessages} messages`;
         function updateRange() {
             maxRange = parseInt(document.getElementById('rangeSelect').value);
             drawRangeRings();
+            if (limitToRange) applyFilter();  // re-cull to the new range
+        }
+
+        function toggleRangeLimit() {
+            limitToRange = document.getElementById('limitRange').checked;
+            try { localStorage.setItem('adsb.limitRange', limitToRange ? '1' : '0'); } catch (e) { /* private mode */ }
+            applyFilter();  // add/remove out-of-range markers immediately
+        }
+
+        function setRetention() {
+            const v = parseInt(document.getElementById('retentionSelect').value, 10);
+            if (isNaN(v)) return;
+            aircraftRetentionMs = v;
+            try { localStorage.setItem('adsb.retentionMs', String(v)); } catch (e) { /* private mode */ }
+            cleanupOldAircraft();  // apply the new retention right away
         }
 
         // ============================================
@@ -1493,14 +1603,16 @@ ACARS: ${r.statistics.acarsMessages} messages`;
             const distances = [maxRange * 0.25, maxRange * 0.5, maxRange * 0.75, maxRange];
             distances.forEach(nm => {
                 const meters = nm * 1852;
+                // Strong enough to read over satellite imagery (it was 1 px at 30%)
                 const circle = L.circle([observerLocation.lat, observerLocation.lon], {
                     radius: meters,
-                    color: '#4a9eff',
+                    color: '#7cc4ff',
                     fillColor: 'transparent',
                     fillOpacity: 0,
-                    weight: 1,
-                    opacity: 0.3,
-                    dashArray: '4 4'
+                    weight: 1.5,
+                    opacity: 0.75,
+                    dashArray: '6 5',
+                    interactive: false
                 });
 
                 const labelLat = observerLocation.lat + (nm * 0.0166);
@@ -1696,6 +1808,7 @@ ACARS: ${r.statistics.acarsMessages} messages`;
                 radarMap.removeLayer(markers[icao]);
                 delete markers[icao];
             });
+            if (headingLines) headingLines.clear();
             Object.keys(markerState).forEach(icao => delete markerState[icao]);
             pendingMarkerUpdates.clear();
             Object.keys(aircraft).forEach(icao => {
@@ -1707,6 +1820,14 @@ ACARS: ${r.statistics.acarsMessages} messages`;
         }
 
         function passesFilter(icao, ac) {
+            // Range limit: hide positioned aircraft beyond the selected range.
+            // Aircraft without a position are kept (they draw no marker anyway).
+            if (limitToRange && observerLocation &&
+                ac.lat !== undefined && ac.lat !== null && ac.lon !== undefined && ac.lon !== null) {
+                if (calculateDistanceNm(observerLocation.lat, observerLocation.lon, ac.lat, ac.lon) > maxRange) {
+                    return false;
+                }
+            }
             if (currentFilter === 'all') return true;
             const militaryInfo = isMilitaryAircraft(icao, ac.callsign);
             const squawkInfo = checkSquawkCode(ac);
@@ -1730,7 +1851,7 @@ ACARS: ${r.statistics.acarsMessages} messages`;
             if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
             if (acarsPollTimer) { clearInterval(acarsPollTimer); acarsPollTimer = null; }
             if (vdl2PollTimer) { clearInterval(vdl2PollTimer); vdl2PollTimer = null; }
-            if (clockInterval) { clearInterval(clockInterval); clockInterval = null; }
+            if (clockInterval) { VisibleInterval.clear(clockInterval); clockInterval = null; }
             if (cleanupInterval) { clearInterval(cleanupInterval); cleanupInterval = null; }
             if (delayedGpsInitTimer) { clearTimeout(delayedGpsInitTimer); delayedGpsInitTimer = null; }
             if (delayedDriverCheckTimer) { clearTimeout(delayedDriverCheckTimer); delayedDriverCheckTimer = null; }
@@ -1796,9 +1917,24 @@ ACARS: ${r.statistics.acarsMessages} messages`;
                     });
             }, 6000);
 
+            // Restore saved display preferences (range limit + retention)
+            try {
+                if (localStorage.getItem('adsb.limitRange') === '1') {
+                    limitToRange = true;
+                    const el = document.getElementById('limitRange');
+                    if (el) el.checked = true;
+                }
+                const savedRet = parseInt(localStorage.getItem('adsb.retentionMs'), 10);
+                if (!isNaN(savedRet)) {
+                    aircraftRetentionMs = savedRet;
+                    const el = document.getElementById('retentionSelect');
+                    if (el) el.value = String(savedRet);
+                }
+            } catch (e) { /* private mode: keep defaults */ }
+
             try {
                 updateClock();
-                clockInterval = setInterval(updateClock, 1000);
+                clockInterval = VisibleInterval.set(updateClock, 1000);
                 cleanupInterval = setInterval(cleanupOldAircraft, 10000);
             } catch (e) {
                 console.error('ADS-B timer bootstrap warning:', e);
@@ -1866,6 +2002,28 @@ ACARS: ${r.statistics.acarsMessages} messages`;
                 option.textContent = `SDR ${idx}: ${dev.name || dev.type || 'SDR'}`;
                 select.appendChild(option);
             });
+            if (select.id === 'adsbDeviceSelect') {
+                if (!select.dataset.gainSync) {
+                    select.dataset.gainSync = '1';
+                    select.addEventListener('change', syncAdsbGainRange);
+                }
+                syncAdsbGainRange();
+            }
+        }
+
+        // HackRF gain spans LNA + VGA (0-102 dB) and ADS-B needs most of it:
+        // LNA 40 / VGA 40 decoded best on a HackRF One, while the RTL-SDR scale
+        // (max 50, preset 40) leaves a HackRF nearly deaf at 1090 MHz.
+        function syncAdsbGainRange() {
+            const select = document.getElementById('adsbDeviceSelect');
+            const input = document.getElementById('adsbGainInput');
+            if (!select || !input) return;
+            const hackrf = select.selectedOptions[0]?.dataset.sdrType === 'hackrf';
+            const [max, preset, otherPreset] = hackrf ? [102, 80, 40] : [50, 40, 80];
+            input.max = max;
+            // Swap presets when the device type changes; keep a value the user typed
+            const value = Number(input.value);
+            if (!input.value || value === otherPreset || value > max) input.value = preset;
         }
 
         function showDeviceDetectionPendingState() {
@@ -1915,8 +2073,8 @@ ACARS: ${r.statistics.acarsMessages} messages`;
 
                 populateCompositeDeviceSelect(adsbSelect, devices, 'No SDR found');
                 populateCompositeDeviceSelect(airbandSelect, devices, 'No SDR found');
-                populateCompositeDeviceSelect(acarsSelect, devices);
-                populateCompositeDeviceSelect(vdl2Select, devices);
+                if (panelFollowsPage('acars')) populateCompositeDeviceSelect(acarsSelect, devices);
+                if (panelFollowsPage('vdl2')) populateCompositeDeviceSelect(vdl2Select, devices);
 
                 if (!devices || devices.length === 0) {
                     if (airbandSelect) airbandSelect.disabled = true;
@@ -1961,91 +2119,40 @@ ACARS: ${r.statistics.acarsMessages} messages`;
         function showDvbDriverWarning(loadedModules) {
             // Don't show if already dismissed this session
             if (sessionStorage.getItem('dvb_warning_dismissed')) return;
-
-            const warning = document.createElement('div');
-            warning.id = 'dvbDriverWarning';
-            warning.style.cssText = `
-                position: fixed;
-                top: 70px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(239, 68, 68, 0.95);
-                color: white;
-                padding: 15px 20px;
-                border-radius: 8px;
-                font-size: 13px;
-                z-index: 10000;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-                max-width: 500px;
-                text-align: center;
-            `;
-
-            warning.innerHTML = `
-                <div style="font-weight: bold; margin-bottom: 8px;">⚠️ DVB Driver Conflict Detected</div>
-                <div style="margin-bottom: 10px;">
-                    Kernel DVB drivers are claiming your RTL-SDR devices, preventing them from working properly.
-                    <br><small>Loaded modules: ${loadedModules.join(', ')}</small>
-                </div>
-                <div style="display: flex; gap: 10px; justify-content: center;">
-                    <button onclick="fixDvbDrivers()" style="background: white; color: #dc2626; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: bold;">
-                        Fix Now
-                    </button>
-                    <button onclick="dismissDvbWarning()" style="background: rgba(255,255,255,0.2); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                        Dismiss
-                    </button>
-                </div>
-            `;
-            document.body.appendChild(warning);
+            AppFeedback.toast({
+                type: 'error',
+                title: 'DVB driver conflict',
+                message: 'Kernel DVB drivers are claiming your RTL-SDR devices, so they cannot be used.\n'
+                    + 'Loaded modules: ' + loadedModules.join(', '),
+                durationMs: 0,
+                actions: [
+                    { label: 'Fix now', onClick: fixDvbDrivers },
+                    { label: 'Dismiss', onClick: dismissDvbWarning },
+                ],
+            });
         }
 
         function fixDvbDrivers() {
-            const warning = document.getElementById('dvbDriverWarning');
-            if (warning) {
-                warning.innerHTML = '<div>Applying fix...</div>';
-            }
-
+            AppFeedback.toast({ title: 'DVB drivers', message: 'Applying fix…', durationMs: 3000 });
             fetch('/settings/rtlsdr/blacklist-drivers', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
-                    if (data.status === 'success' || data.status === 'partial') {
-                        if (warning) {
-                            warning.style.background = 'rgba(34, 197, 94, 0.95)';
-                            warning.innerHTML = `
-                                <div style="font-weight: bold;">✓ DVB Drivers Disabled</div>
-                                <div style="margin-top: 8px;">${data.message}</div>
-                                <button onclick="this.parentElement.remove()" style="margin-top: 10px; background: white; color: #16a34a; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                                    OK
-                                </button>
-                            `;
-                        }
-                    } else {
-                        if (warning) {
-                            warning.innerHTML = `
-                                <div style="font-weight: bold;">Manual Fix Required</div>
-                                <div style="margin-top: 8px;">${data.message}</div>
-                                <button onclick="this.parentElement.remove()" style="margin-top: 10px; background: rgba(255,255,255,0.2); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                                    Close
-                                </button>
-                            `;
-                        }
-                    }
+                    const fixed = data.status === 'success' || data.status === 'partial';
+                    AppFeedback.toast({
+                        type: fixed ? 'success' : 'warning',
+                        title: fixed ? 'DVB drivers disabled' : 'Manual fix required',
+                        message: data.message || '',
+                        durationMs: fixed ? 10000 : 0,
+                        actions: fixed ? [] : [{ label: 'Close' }],
+                    });
                 })
                 .catch(err => {
-                    if (warning) {
-                        warning.innerHTML = `
-                            <div>Error: ${err.message}</div>
-                            <button onclick="this.parentElement.remove()" style="margin-top: 10px; background: rgba(255,255,255,0.2); color: white; border: none; padding: 8px 16px; border-radius: 4px; cursor: pointer;">
-                                Close
-                            </button>
-                        `;
-                    }
+                    AppFeedback.toast({ type: 'error', title: 'DVB fix failed', message: err.message, durationMs: 0, actions: [{ label: 'Close' }] });
                 });
         }
 
         function dismissDvbWarning() {
             sessionStorage.setItem('dvb_warning_dismissed', 'true');
-            const warning = document.getElementById('dvbDriverWarning');
-            if (warning) warning.remove();
         }
 
         function checkAdsbTools(devices = []) {
@@ -2055,7 +2162,10 @@ ACARS: ${r.statistics.acarsMessages} messages`;
                     const soapyTypes = (devices || [])
                         .filter((d) => ['hackrf', 'limesdr', 'airspy'].includes((d.sdr_type || '').toLowerCase()))
                         .map((d) => d.sdr_type);
-                    if (!data.readsb && soapyTypes.length > 0) {
+                    // Only worth saying when no RTL-SDR can do ADS-B instead; starting on a
+                    // SoapySDR device without readsb reports the same thing anyway
+                    const hasRtlSdr = (devices || []).some((d) => (d.sdr_type || 'rtlsdr').toLowerCase() === 'rtlsdr');
+                    if (!data.readsb && soapyTypes.length > 0 && !hasRtlSdr) {
                         showReadsbWarning(soapyTypes);
                     }
                 })
@@ -2090,139 +2200,48 @@ ACARS: ${r.statistics.acarsMessages} messages`;
         }
 
         function showAircraftDbBanner(type, version) {
-            // Remove any existing banner
-            const existing = document.getElementById('aircraftDbBanner');
-            if (existing) existing.remove();
-
-            const _dbTier = document.documentElement.getAttribute('data-ui-tier') || 'enhanced';
-            const _dbBg = _dbTier === 'enhanced'
-                ? (type === 'not_installed' ? 'rgba(4, 22, 26, 0.97)' : 'rgba(4, 22, 26, 0.97)')
-                : (type === 'not_installed' ? 'rgba(59, 130, 246, 0.95)' : 'rgba(34, 197, 94, 0.95)');
-            const _dbBorder = _dbTier === 'enhanced'
-                ? (type === 'not_installed' ? '1px solid rgba(46, 125, 138, 0.45)' : '1px solid rgba(46, 125, 138, 0.45)')
-                : 'none';
-            const _dbBtnColor = _dbTier === 'enhanced'
-                ? (type === 'not_installed' ? '#2e7d8a' : '#38c180')
-                : (type === 'not_installed' ? '#3b82f6' : '#22c55e');
-
-            const banner = document.createElement('div');
-            banner.id = 'aircraftDbBanner';
-            banner.style.cssText = `
-                position: fixed;
-                top: 70px;
-                right: 20px;
-                background: ${_dbBg};
-                border: ${_dbBorder};
-                color: white;
-                padding: 12px 16px;
-                border-radius: 8px;
-                font-size: 12px;
-                z-index: 10000;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.3);
-                max-width: 320px;
-                font-family: var(--font-sans);
-            `;
-
-            if (type === 'not_installed') {
-                banner.innerHTML = `
-                    <div style="font-weight: bold; margin-bottom: 6px;">Aircraft Database Not Installed</div>
-                    <div style="margin-bottom: 10px; font-size: 11px; opacity: 0.9;">Download to see aircraft types, registrations, and model info.</div>
-                    <button onclick="downloadAircraftDb()" style="background: rgba(0,0,0,0.35); color: ${_dbBtnColor}; border: 1px solid ${_dbBtnColor}; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 500; font-size: 11px;">Download Database</button>
-                    <button onclick="this.parentElement.remove()" style="position: absolute; top: 6px; right: 8px; background: none; border: none; color: white; cursor: pointer; font-size: 14px;">×</button>
-                `;
-            } else {
-                banner.innerHTML = `
-                    <div style="font-weight: bold; margin-bottom: 6px;">Database Update Available</div>
-                    <div style="margin-bottom: 10px; font-size: 11px; opacity: 0.9;">New version: ${version || 'latest'}</div>
-                    <button onclick="downloadAircraftDb()" style="background: rgba(0,0,0,0.35); color: ${_dbBtnColor}; border: 1px solid ${_dbBtnColor}; padding: 6px 12px; border-radius: 4px; cursor: pointer; font-weight: 500; font-size: 11px;">Update Now</button>
-                    <button onclick="this.parentElement.remove()" style="position: absolute; top: 6px; right: 8px; background: none; border: none; color: white; cursor: pointer; font-size: 14px;">×</button>
-                `;
-            }
-
-            document.body.appendChild(banner);
+            const missing = type === 'not_installed';
+            AppFeedback.toast({
+                title: missing ? 'Aircraft database not installed' : 'Aircraft database update available',
+                message: missing
+                    ? 'Download it to see aircraft types, registrations and model details.'
+                    : 'New version: ' + (version || 'latest'),
+                durationMs: 20000,
+                actions: [
+                    { label: missing ? 'Download database' : 'Update now', onClick: downloadAircraftDb },
+                    { label: 'Later' },
+                ],
+            });
         }
 
         function downloadAircraftDb() {
-            const banner = document.getElementById('aircraftDbBanner');
-            if (banner) {
-                banner.innerHTML = `
-                    <div style="font-weight: bold;">Downloading...</div>
-                    <div style="font-size: 11px; opacity: 0.9;">This may take a moment</div>
-                `;
-            }
-
+            AppFeedback.toast({ title: 'Aircraft database', message: 'Downloading… this may take a moment.', durationMs: 4000 });
             fetch('/adsb/aircraft-db/download', { method: 'POST' })
                 .then(r => r.json())
                 .then(data => {
                     if (data.success) {
-                        if (banner) {
-                            banner.style.background = 'rgba(34, 197, 94, 0.95)';
-                            banner.innerHTML = `
-                                <div style="font-weight: bold;">Database Installed</div>
-                                <div style="font-size: 11px; opacity: 0.9;">${data.message}</div>
-                            `;
-                            setTimeout(() => banner.remove(), 3000);
-                        }
                         aircraftDbStatus.installed = true;
+                        AppFeedback.toast({ type: 'success', title: 'Aircraft database installed', message: data.message || '' });
                     } else {
-                        if (banner) {
-                            banner.style.background = 'rgba(239, 68, 68, 0.95)';
-                            banner.innerHTML = `
-                                <div style="font-weight: bold;">Download Failed</div>
-                                <div style="font-size: 11px;">${data.error || 'Unknown error'}</div>
-                                <button onclick="this.parentElement.remove()" style="position: absolute; top: 6px; right: 8px; background: none; border: none; color: white; cursor: pointer; font-size: 14px;">×</button>
-                            `;
-                        }
+                        AppFeedback.toast({ type: 'error', title: 'Download failed', message: data.error || data.message || 'Unknown error', durationMs: 0, actions: [{ label: 'Close' }] });
                     }
                 })
                 .catch(err => {
-                    if (banner) {
-                        banner.style.background = 'rgba(239, 68, 68, 0.95)';
-                        banner.innerHTML = `
-                            <div style="font-weight: bold;">Download Failed</div>
-                            <div style="font-size: 11px;">${err.message}</div>
-                            <button onclick="this.parentElement.remove()" style="position: absolute; top: 6px; right: 8px; background: none; border: none; color: white; cursor: pointer; font-size: 14px;">×</button>
-                        `;
-                    }
+                    AppFeedback.toast({ type: 'error', title: 'Download failed', message: err.message, durationMs: 0, actions: [{ label: 'Close' }] });
                 });
         }
 
         function showReadsbWarning(sdrTypes) {
             const typeList = sdrTypes.join(', ') || 'SoapySDR device';
-            const warning = document.createElement('div');
-            warning.id = 'readsbWarning';
-            warning.style.cssText = `
-                position: fixed;
-                bottom: 80px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(245, 158, 11, 0.95);
-                color: #000;
-                padding: 15px 25px;
-                border-radius: 8px;
-                font-size: 12px;
-                z-index: 10000;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-                max-width: 500px;
-                text-align: left;
-                font-family: var(--font-sans);
-            `;
-            warning.innerHTML = `
-                <div style="font-weight: bold; margin-bottom: 8px;">⚠️ ${typeList} Detected - readsb Required</div>
-                <div style="margin-bottom: 10px;">ADS-B tracking with ${typeList} requires <strong>readsb</strong> compiled with SoapySDR support.</div>
-                <details style="font-size: 11px;">
-                    <summary style="cursor: pointer; margin-bottom: 8px;">Installation Instructions</summary>
-                    <div style="background: rgba(0,0,0,0.1); padding: 10px; border-radius: 4px; margin-top: 5px;">
-                        <code style="display: block; white-space: pre-wrap; font-family: var(--font-mono); font-size: 10px;">sudo apt install build-essential libsoapysdr-dev librtlsdr-dev
-git clone https://github.com/wiedehopf/readsb.git
-cd readsb
-make HAVE_SOAPYSDR=1
-sudo make install</code>
-                    </div>
-                </details>
-                <button onclick="this.parentElement.remove()" style="position: absolute; top: 8px; right: 12px; background: none; border: none; color: #000; cursor: pointer; font-size: 16px; font-weight: bold;">×</button>
-            `;
-            document.body.appendChild(warning);
+            AppFeedback.toast({
+                type: 'warning',
+                title: typeList + ' detected: readsb required',
+                message: 'ADS-B with ' + typeList + ' needs readsb built with SoapySDR support. Install a C toolchain '
+                    + 'and the SoapySDR and librtlsdr development packages, then:\n'
+                    + 'git clone https://github.com/wiedehopf/readsb.git\ncd readsb\nmake HAVE_SOAPYSDR=1\nsudo make install',
+                durationMs: 0,
+                actions: [{ label: 'Dismiss' }],
+            });
         }
 
         function updateClock() {
@@ -2258,6 +2277,28 @@ sudo make install</code>
                 },
                 scaleBar: true,
             });
+
+            headingLines = TrackIcons.vectors(radarMap);
+            let labelsOn = true;
+            try { labelsOn = localStorage.getItem(LABELS_KEY) !== '0'; } catch (e) { /* default on */ }
+            const labelsBox = document.getElementById('showLabels');
+            if (labelsBox) labelsBox.checked = labelsOn;
+            mapLabels = TrackIcons.labels(radarMap, { minZoom: 8, enabled: labelsOn });
+            // Fade aircraft not heard for 20 s (they drop off at 60 s)
+            setInterval(() => {
+                const now = Date.now();
+                Object.keys(markers).forEach((icao) => {
+                    const el = markers[icao].getElement && markers[icao].getElement();
+                    if (el && aircraft[icao]) el.classList.toggle('ti-stale', now - (aircraft[icao].lastSeen || 0) > 20000);
+                });
+            }, 5000);
+
+            if (window.ReceptionOutline) {
+                receptionOutline = ReceptionOutline.create(radarMap, {
+                    key: 'adsb', observer: () => observerLocation, color: '#4a9eff',
+                    visible: document.getElementById('showReach')?.checked !== false,
+                });
+            }
         }
 
         // Handle window resize for map (especially important on mobile)
@@ -2301,7 +2342,7 @@ sudo make install</code>
             const btn = document.getElementById('startBtn');
             const useAgent = typeof adsbCurrentAgent !== 'undefined' && adsbCurrentAgent !== 'local';
 
-            if (isTrackingStarting) {
+            if (isTrackingStarting || isTrackingStopping) {
                 return;
             }
 
@@ -2449,6 +2490,11 @@ sudo make install</code>
                     }
                 }
             } else {
+                // A stop can take a few seconds (dump1090 has to let go of the
+                // dongle): say so, and ignore clicks meanwhile, rather than look dead.
+                isTrackingStopping = true;
+                btn.disabled = true;
+                btn.textContent = 'STOPPING…';
                 try {
                     // Route stop through the source that actually started tracking.
                     const stopSource = adsbTrackingSource || (useAgent ? adsbCurrentAgent : 'local');
@@ -2486,7 +2532,11 @@ sudo make install</code>
                     }
                 } catch (err) {
                     alert('Failed to stop ADS-B: ' + err.message);
+                    btn.textContent = 'STOP';
                     return;
+                } finally {
+                    isTrackingStopping = false;
+                    btn.disabled = false;
                 }
 
                 stopEventStream();
@@ -2901,20 +2951,26 @@ sudo make install</code>
                     delete markers[icao];
                     delete markerState[icao];
                 }
+                if (headingLines) headingLines.remove(icao);
                 return;
             }
 
             const militaryInfo = isMilitaryAircraft(icao, ac.callsign);
             const rotation = Math.round((ac.heading || 0) / 5) * 5;
-            const color = militaryInfo.military ? '#556b2f' : getAltitudeColor(ac.altitude);
+            const color = militaryInfo.military ? MILITARY_MAP_COLOR : getAltitudeColor(ac.altitude);
             const callsign = ac.callsign || icao;
             const alt = ac.altitude ? ac.altitude + ' ft' : 'N/A';
             const typeLabel = ac.type_desc || ac.type_code || '';
             const iconType = getAircraftIconType(ac.type_code, militaryInfo.military);
             const isSelected = icao === selectedIcao;
+            const ground = ac.on_ground === true;
+            const emergency = TrackIcons.isEmergencySquawk(ac.squawk);
+            const label = aircraftLabel(ac);
 
             const prevState = markerState[icao] || {};
-            const iconChanged = prevState.rotation !== rotation || prevState.color !== color || prevState.iconType !== iconType || prevState.isSelected !== isSelected;
+            const iconChanged = prevState.rotation !== rotation || prevState.color !== color || prevState.iconType !== iconType ||
+                prevState.isSelected !== isSelected || prevState.ground !== ground || prevState.emergency !== emergency ||
+                prevState.label !== label;
             const tooltipChanged = prevState.callsign !== callsign || prevState.alt !== alt || prevState.typeLabel !== typeLabel;
 
             const tooltipContent = typeLabel
@@ -2924,16 +2980,15 @@ sudo make install</code>
             if (markers[icao]) {
                 markers[icao].setLatLng([ac.lat, ac.lon]);
                 if (iconChanged) {
-                    markers[icao].setIcon(createMarkerIcon(rotation, color, iconType, isSelected));
+                    markers[icao].setIcon(createMarkerIcon(rotation, color, iconType, isSelected, ground, emergency, label));
                 }
                 if (tooltipChanged) {
-                    markers[icao].unbindTooltip();
-                    markers[icao].bindTooltip(tooltipContent, {
-                        permanent: false, direction: 'top', className: 'aircraft-tooltip'
-                    });
+                    // Update in place so an open (hovered) tooltip refreshes its
+                    // numbers instead of closing on every data update.
+                    markers[icao].setTooltipContent(tooltipContent);
                 }
             } else {
-                markers[icao] = L.marker([ac.lat, ac.lon], { icon: createMarkerIcon(rotation, color, iconType, isSelected) })
+                markers[icao] = L.marker([ac.lat, ac.lon], { icon: createMarkerIcon(rotation, color, iconType, isSelected, ground, emergency, label) })
                     .addTo(radarMap)
                     .on('click', () => selectAircraft(icao, 'map'));
                 markers[icao].bindTooltip(tooltipContent, {
@@ -2941,25 +2996,15 @@ sudo make install</code>
                 });
             }
 
-            markerState[icao] = { rotation, color, callsign, alt, typeLabel, iconType, isSelected };
+            markerState[icao] = { rotation, color, callsign, alt, typeLabel, iconType, isSelected, ground, emergency, label };
+
+            // Where it will be in a minute (not for aircraft on the ground)
+            if (headingLines) {
+                if (ground) headingLines.remove(icao);
+                else headingLines.update(icao, ac.lat, ac.lon, ac.heading, ac.speed, emergency ? '#ff3b3b' : color);
+            }
         }
 
-        // Aircraft type icon SVG paths
-        const AIRCRAFT_ICONS = {
-            // Widebody: wide wingspan, wide tail — 747, 777, A330, A380 etc.
-            widebody: 'M12 2L7 10H2v2l10 4 10-4v-2h-5L12 2zm0 14l-7 3v1h14v-1l-7-3z',
-            // Narrowbody / default jet — A320, B737 etc.
-            jet: 'M12 2L8 10H4v2l8 4 8-4v-2h-4L12 2zm0 14l-6 3v1h12v-1l-6-3z',
-            // Business jet: narrow swept wings set further aft
-            bizjet: 'M12 2L11 11H7v2l5 2.5 5-2.5v-2h-4L12 2zm0 13l-4 2v1h8v-1l-4-2z',
-            // Turboprop: straight high-aspect wings, engines forward
-            turboprop: 'M12 2L10 8H3v2.5l9 3.5 9-3.5V8h-7L12 2zm0 13l-5 2.5v1h10v-1l-5-2.5z',
-            helicopter: 'M12 4L10 6H8V8h1l3 8 3-8h1V6h-2L12 4zm-1 14v2H9v1h6v-1h-2v-2h-2zm7-7h-2v2h2v-2zM4 11h2v2H4v-2z',
-            // Light piston GA — C172, PA28 etc.
-            prop: 'M12 3L9 8H5v2l7 6 7-6v-2h-4L12 3zm0 12l-4 2v1h8v-1l-4-2z',
-            military: 'M12 2L7 9H3l1 3 8 6 8-6 1-3h-4L12 2zm0 14l-5 2.5V20h10v-1.5L12 16z',
-            glider: 'M12 4L10 8H4v1.5l8 4 8-4V8h-6L12 4zm0 10l-6 2v1h12v-1l-6-2z'
-        };
 
         // Determine aircraft icon type from ICAO type_code
         function getAircraftIconType(typeCode, isMilitary) {
@@ -3021,21 +3066,11 @@ sudo make install</code>
             return 'jet';
         }
 
-        function createMarkerIcon(rotation, color, iconType = 'jet', isSelected = false) {
-            const path = AIRCRAFT_ICONS[iconType] || AIRCRAFT_ICONS.jet;
-            const size = iconType === 'helicopter' ? 22 : iconType === 'widebody' ? 26 : iconType === 'bizjet' ? 22 : 24;
-            const glowColor = isSelected ? 'rgba(255,255,255,0.9)' : color;
-            const glowSize = isSelected ? '10px' : '5px';
-            const trackingRing = isSelected ?
-                '<div class="tracking-ring"></div><div class="tracking-ring-inner"></div>' : '';
-            return L.divIcon({
-                className: `aircraft-marker aircraft-${iconType}${isSelected ? ' selected' : ''}`,
-                html: `${trackingRing}<svg width="${size}" height="${size}" viewBox="0 0 24 24" style="transform: rotate(${rotation}deg); color: ${color}; filter: drop-shadow(0 0 ${glowSize} ${glowColor});">
-                    <path fill="currentColor" d="${path}"/>
-                </svg>`,
-                iconSize: [size, size],
-                iconAnchor: [size/2, size/2]
-            });
+        // Markers and heading lines: components/track-icons.js
+        // Military on the map: light khaki (the list's olive badge vanishes on dark imagery)
+        const MILITARY_MAP_COLOR = '#b8c46a';
+        function createMarkerIcon(rotation, color, iconType = 'jet', isSelected = false, ground = false, emergency = false, label = '') {
+            return TrackIcons.aircraft({ type: iconType, color, heading: rotation, selected: isSelected, ground, emergency, label });
         }
 
         // ============================================
@@ -3078,6 +3113,7 @@ sudo make install</code>
                     div.setAttribute('data-icao', ac.icao);
                     div.onclick = () => selectAircraft(ac.icao, 'panel');
                     div.innerHTML = buildAircraftItemHTML(ac);
+                    styleAircraftRow(div, ac);
                     fragment.appendChild(div);
                 });
 
@@ -3095,9 +3131,18 @@ sudo make install</code>
                     if (existingItem) {
                         existingItem.className = `aircraft-item ${selectedIcao === ac.icao ? 'selected' : ''} ${isOnWatchlist(ac) ? 'watched' : ''}`;
                         existingItem.innerHTML = buildAircraftItemHTML(ac);
+                        styleAircraftRow(existingItem, ac);
                     }
                 });
             }
+        }
+
+        // The row's edge in the aircraft's altitude colour (as on the map), and
+        // faded once it has been quiet for 20 s (it drops off at 60 s)
+        function styleAircraftRow(row, ac) {
+            row.style.setProperty('--alt-color', getAltitudeColor(ac.altitude));
+            row.classList.toggle('stale', Date.now() - (ac.lastSeen || 0) > 20000);
+            row.title = ac.altitude ? `${ac.altitude.toLocaleString()} ft` : 'Altitude unknown';
         }
 
         function buildAircraftItemHTML(ac) {
@@ -3126,7 +3171,7 @@ sudo make install</code>
             return `
                 <div class="aircraft-header">
                     <span class="aircraft-callsign">${escapeHtml(callsign)}${badge}${acarsIndicator}${agentBadge}</span>
-                    <span class="aircraft-icao">${typeCode ? escapeHtml(typeCode) + ' • ' : ''}${escapeHtml(ac.icao)}</span>
+                    <span class="aircraft-icao">${typeCode ? escapeHtml(typeCode) + ' • ' : ''}${CopyId.html(ac.icao)}${DeviceNotes.html(ac.icao, 'adsb')}</span>
                 </div>
                 <div class="aircraft-details">
                     <div class="aircraft-detail">
@@ -3289,10 +3334,12 @@ sudo make install</code>
                     const ac = aircraft[targetIcao];
                     const militaryInfo = isMilitaryAircraft(targetIcao, ac.callsign);
                     const rotation = Math.round((ac.heading || 0) / 5) * 5;
-                    const color = militaryInfo.military ? '#556b2f' : getAltitudeColor(ac.altitude);
+                    const color = militaryInfo.military ? MILITARY_MAP_COLOR : getAltitudeColor(ac.altitude);
                     const iconType = getAircraftIconType(ac.type_code, militaryInfo.military);
                     const isSelected = targetIcao === icao;
-                    markers[targetIcao].setIcon(createMarkerIcon(rotation, color, iconType, isSelected));
+                    markers[targetIcao].setIcon(createMarkerIcon(rotation, color, iconType, isSelected,
+                        ac.on_ground === true, TrackIcons.isEmergencySquawk(ac.squawk), aircraftLabel(ac)));
+                    if (markerState[targetIcao]) markerState[targetIcao].label = aircraftLabel(ac);
                     // Update marker state to reflect selection
                     if (markerState[targetIcao]) {
                         markerState[targetIcao].isSelected = isSelected;
@@ -3310,12 +3357,13 @@ sudo make install</code>
                 const targetLat = ac.lat;
                 const targetLon = ac.lon;
 
-                if (source === 'panel' && radarMap) {
+                // Focus-in crosshair animation for every selection source —
+                // clicking a plane on the map, in the list, or in a linked
+                // message all fly to the aircraft with the crosshair sweep.
+                if (radarMap) {
                     runPanelSelectionAnimation(targetLat, targetLon, mapCrosshairRequestId);
                     return;
                 }
-
-                radarMap.setView([targetLat, targetLon], 10);
             }
         }
 
@@ -3381,7 +3429,7 @@ sudo make install</code>
                 <div class="telemetry-grid">
                     <div class="telemetry-item">
                         <div class="telemetry-label">ICAO</div>
-                        <div class="telemetry-value">${ac.icao}</div>
+                        <div class="telemetry-value">${CopyId.html(ac.icao)}${DeviceNotes.html(ac.icao, 'adsb')}</div>
                     </div>
                     <div class="telemetry-item">
                         <div class="telemetry-label">Squawk</div>
@@ -3510,7 +3558,7 @@ sudo make install</code>
             const text = msg.text || msg.msg || '';
             const truncText = escapeHtml(text.length > 200 ? text.substring(0, 200) + '...' : text);
             const time = msg.timestamp && typeof InterceptTime !== 'undefined'
-                ? InterceptTime.shortTime(msg.timestamp) + InterceptTime.tzSuffix()
+                ? InterceptTime.relTimeHtml(msg.timestamp)
                 : (msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : '');
             const flight = escapeHtml(msg.flight || '');
             const tail = escapeHtml(msg.tail || msg.reg || '');
@@ -3620,7 +3668,7 @@ sudo make install</code>
 
         function cleanupOldAircraft() {
             const now = Date.now();
-            const timeout = 60000;
+            const timeout = aircraftRetentionMs;
             let needsUpdate = false;
 
             Object.keys(aircraft).forEach(icao => {
@@ -3630,6 +3678,7 @@ sudo make install</code>
                         delete markers[icao];
                     }
                     cleanupTrail(icao);
+                    if (headingLines) headingLines.remove(icao);
                     delete aircraft[icao];
                     delete alertedAircraft[icao];
                     if (typeof acarsAircraftIcaos !== 'undefined') acarsAircraftIcaos.delete(icao);
@@ -3784,44 +3833,88 @@ sudo make install</code>
         }
 
         function showAirbandWarning(missingTools) {
-            const warning = document.createElement('div');
-            warning.id = 'airbandWarning';
-            warning.style.cssText = `
-                position: fixed;
-                bottom: 70px;
-                left: 50%;
-                transform: translateX(-50%);
-                background: rgba(239, 68, 68, 0.95);
-                color: white;
-                padding: 12px 20px;
-                border-radius: 8px;
-                font-size: 12px;
-                z-index: 10000;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-                max-width: 400px;
-                text-align: center;
-            `;
-
-            const toolList = missingTools.join(', ');
-            warning.innerHTML = `
-                <div style="font-weight: bold; margin-bottom: 6px;">⚠️ Airband Listen Unavailable</div>
-                <div>Missing required tools: <strong>${toolList}</strong></div>
-                <div style="margin-top: 8px; font-size: 10px; opacity: 0.9;">
-                    Install with: <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px;">sudo apt install rtl-sdr ffmpeg</code> (Debian) or <code style="background: rgba(0,0,0,0.3); padding: 2px 6px; border-radius: 3px;">brew install librtlsdr ffmpeg</code> (macOS)
-                </div>
-                <button onclick="this.parentElement.remove()" style="position: absolute; top: 5px; right: 8px; background: none; border: none; color: white; cursor: pointer; font-size: 14px;">×</button>
-            `;
-            document.body.appendChild(warning);
-
-            // Auto-dismiss after 15 seconds
-            setTimeout(() => {
-                if (warning.parentElement) {
-                    warning.style.opacity = '0';
-                    warning.style.transition = 'opacity 0.3s';
-                    setTimeout(() => warning.remove(), 300);
-                }
-            }, 15000);
+            // Install advice for this platform, from the dependency map.
+            const show = (hints) => AppFeedback.toast({
+                type: 'warning',
+                title: 'Airband listen unavailable',
+                message: 'Missing: ' + missingTools.join(', ') + '\n'
+                    + missingTools.map(tool => tool + ': ' + (hints[tool] || 'install ' + tool + " with your system's package manager.")).join('\n'),
+                durationMs: 15000,
+            });
+            fetch('/dependencies')
+                .then(r => r.json())
+                .then(data => show((data && data.install_hints) || {}))
+                .catch(() => show({}));
         }
+
+        // ── Airband compact chip + popover ──────────────────────────────
+        function positionAirbandPanel() {
+            const panel = document.getElementById('airbandPanel');
+            const chip = document.getElementById('airbandChip');
+            if (!panel || !chip || panel.hidden) return;
+            const r = chip.getBoundingClientRect();
+            const width = panel.offsetWidth || 300;
+            // Clamp within the viewport; open above the chip.
+            const left = Math.max(8, Math.min(r.left, window.innerWidth - width - 8));
+            panel.style.left = left + 'px';
+            panel.style.bottom = (window.innerHeight - r.top + 8) + 'px';
+        }
+
+        function toggleAirbandPanel() {
+            const panel = document.getElementById('airbandPanel');
+            const chip = document.getElementById('airbandChip');
+            if (!panel || !chip) return;
+            const willOpen = panel.hidden;
+            panel.hidden = !willOpen;
+            chip.classList.toggle('open', willOpen);
+            chip.setAttribute('aria-expanded', willOpen ? 'true' : 'false');
+            if (willOpen) positionAirbandPanel();
+        }
+
+        window.addEventListener('resize', positionAirbandPanel);
+
+        function updateAirbandChip() {
+            const sel = document.getElementById('airbandFreqSelect');
+            const freqEl = document.getElementById('airbandChipFreq');
+            if (sel && freqEl) {
+                let label;
+                if (sel.value === 'custom') {
+                    const cf = document.getElementById('airbandCustomFreq');
+                    label = (cf && cf.value) ? cf.value : 'Custom';
+                } else {
+                    const opt = sel.options[sel.selectedIndex];
+                    label = String(opt ? opt.text : sel.value).replace(/\s*(Guard|Air-Air)\s*/i, '').trim();
+                }
+                freqEl.textContent = label;
+            }
+            const btn = document.getElementById('airbandBtn');
+            const dot = document.getElementById('airbandChipDot');
+            if (dot) dot.classList.toggle('listening', !!(btn && btn.classList.contains('active')));
+        }
+
+        (function initAirbandChip() {
+            const status = document.getElementById('airbandStatus');
+            const btn = document.getElementById('airbandBtn');
+            const sel = document.getElementById('airbandFreqSelect');
+            const cf = document.getElementById('airbandCustomFreq');
+            if (sel) sel.addEventListener('change', updateAirbandChip);
+            if (cf) cf.addEventListener('input', updateAirbandChip);
+            // Mirror listening state (airbandBtn gains .active) onto the chip dot.
+            const obs = new MutationObserver(updateAirbandChip);
+            if (btn) obs.observe(btn, { attributes: true, attributeFilter: ['class'] });
+            if (status) obs.observe(status, { childList: true, characterData: true, subtree: true });
+            // Close the popover on an outside click.
+            document.addEventListener('click', (e) => {
+                const panel = document.getElementById('airbandPanel');
+                const chip = document.getElementById('airbandChip');
+                if (!panel || panel.hidden || !chip) return;
+                if (chip.contains(e.target) || panel.contains(e.target)) return;
+                panel.hidden = true;
+                chip.classList.remove('open');
+                chip.setAttribute('aria-expanded', 'false');
+            });
+            updateAirbandChip();
+        })();
 
         function updateAirbandFreq() {
             const select = document.getElementById('airbandFreqSelect');
@@ -3873,6 +3966,48 @@ sudo make install</code>
                 return parseFloat(document.getElementById('airbandCustomFreq').value) || 121.5;
             }
             return parseFloat(select.value);
+        }
+
+        // Tune the airband receiver to the nearest airport's ATC frequency for
+        // the selected aircraft (issue #271). Picks TWR, else APP, else ATIS.
+        async function tuneNearestAtc() {
+            if (!selectedIcao || !aircraft[selectedIcao]) return;
+            const ac = aircraft[selectedIcao];
+            if (ac.lat === undefined || ac.lat === null || ac.lon === undefined || ac.lon === null) {
+                AppFeedback.toast({ type: 'error', title: 'No position', message: 'This aircraft has no position yet.' });
+                return;
+            }
+            let data;
+            try {
+                const resp = await fetchJsonWithTimeout(`/adsb/nearest-airband?lat=${ac.lat}&lon=${ac.lon}`, {}, 5000);
+                data = await resp.json();
+            } catch (e) {
+                AppFeedback.toast({ type: 'error', title: 'ATC lookup failed', message: e.message || 'Request failed' });
+                return;
+            }
+            if (!data || !data.airports || data.airports.length === 0) {
+                AppFeedback.toast({ title: 'No ATC nearby', message: 'No airport with published tower/approach frequencies within range.' });
+                return;
+            }
+            const ap = data.airports[0];
+            const freq = ap.freqs.find(f => f.type === 'TWR')
+                || ap.freqs.find(f => f.type === 'APP')
+                || ap.freqs[0];
+
+            document.getElementById('airbandFreqSelect').value = 'custom';
+            document.getElementById('airbandCustomFreq').value = freq.mhz;
+            updateAirbandFreq();  // reveal the custom input
+            if (isAirbandPlaying) {
+                stopAirband();
+                setTimeout(startAirband, 300);
+            } else {
+                startAirband();
+            }
+            AppFeedback.toast({
+                type: 'success',
+                title: `Tuned ${ap.ident} ${freq.type} ${freq.mhz} MHz`,
+                message: `${ap.name} — ${ap.distance_nm} nm from the aircraft`,
+            });
         }
 
         function toggleAirband() {
@@ -4035,7 +4170,7 @@ sudo make install</code>
         let acarsSidebarCollapsed = localStorage.getItem('acarsSidebarCollapsed') !== 'false';
         let acarsFrequencies = {
             'na': ['131.550', '130.025', '129.125'],
-            'eu': ['131.525', '131.725', '131.550'],
+            'eu': ['131.525', '131.725', '131.550', '131.825'],
             'ap': ['131.550', '131.450']
         };
 
@@ -4069,6 +4204,7 @@ sudo make install</code>
                     if (data.running) {
                         isAcarsRunning = true;
                         acarsMessageCount = data.message_count || 0;
+                        document.getElementById('acarsSourceSelect').disabled = true;
                         document.getElementById('acarsCount').textContent = acarsMessageCount;
                         document.getElementById('acarsToggleBtn').textContent = '■ STOP ACARS';
                         document.getElementById('acarsToggleBtn').classList.add('active');
@@ -4141,12 +4277,13 @@ sudo make install</code>
             const device = deviceIdx;
             const frequencies = getAcarsRegionFreqs();
 
-            // Check if using agent mode
-            const isAgentMode = typeof adsbCurrentAgent !== 'undefined' && adsbCurrentAgent !== 'local';
-            acarsCurrentAgent = isAgentMode ? adsbCurrentAgent : null;
+            // Run where the panel's source says (by default, wherever ADS-B is set to run)
+            const source = panelSource('acars');
+            const isAgentMode = source !== 'local';
+            acarsCurrentAgent = isAgentMode ? source : null;
 
-            // Warn if using same device as ADS-B (only for local mode)
-            if (!isAgentMode && isTracking && adsbActiveDevice !== null && device === String(adsbActiveDevice)) {
+            // Warn if using the same local device as ADS-B
+            if (!isAgentMode && isTracking && (adsbTrackingSource || 'local') === 'local' && adsbActiveDevice !== null && device === String(adsbActiveDevice)) {
                 const useAnyway = await AppFeedback.confirmAction({
                     title: 'SDR Device Conflict',
                     message: `ADS-B tracking is using SDR device ${adsbActiveDevice}. ACARS uses VHF frequencies (129-131 MHz) while ADS-B uses 1090 MHz. You need TWO separate SDR devices to receive both simultaneously. Continue to start ACARS on device ${device} anyway.`,
@@ -4158,7 +4295,7 @@ sudo make install</code>
 
             // Determine endpoint based on agent mode
             const endpoint = isAgentMode
-                ? `/controller/agents/${adsbCurrentAgent}/acars/start`
+                ? `/controller/agents/${source}/acars/start`
                 : '/acars/start';
 
             fetch(endpoint, {
@@ -4174,6 +4311,7 @@ sudo make install</code>
                 if (scanResult.status === 'started' || scanResult.status === 'success') {
                     isAcarsRunning = true;
                     acarsMessageCount = 0;
+                    document.getElementById('acarsSourceSelect').disabled = true;
                     document.getElementById('acarsToggleBtn').textContent = '■ STOP ACARS';
                     document.getElementById('acarsToggleBtn').classList.add('active');
                     document.getElementById('acarsPanelIndicator').classList.add('active');
@@ -4196,6 +4334,7 @@ sudo make install</code>
                 .then(() => {
                     isAcarsRunning = false;
                     acarsCurrentAgent = null;
+                    document.getElementById('acarsSourceSelect').disabled = false;
                     document.getElementById('acarsToggleBtn').textContent = '▶ START ACARS';
                     document.getElementById('acarsToggleBtn').classList.remove('active');
                     document.getElementById('acarsPanelIndicator').classList.remove('active');
@@ -4213,7 +4352,11 @@ sudo make install</code>
 
         // Sync ACARS UI state (called by syncModeUI in agents.js)
         function setAcarsRunning(running, agentId = null) {
+            // A status sync from one source must not overwrite ACARS running on
+            // another, e.g. switching the header to an agent while ACARS runs locally
+            if (isAcarsRunning && String(acarsCurrentAgent) !== String(agentId)) return;
             isAcarsRunning = running;
+            document.getElementById('acarsSourceSelect').disabled = running;
             const btn = document.getElementById('acarsToggleBtn');
             const indicator = document.getElementById('acarsPanelIndicator');
 
@@ -4574,12 +4717,13 @@ sudo make install</code>
             const device = deviceIdx;
             const frequencies = getVdl2RegionFreqs();
 
-            // Check if using agent mode
-            const isAgentMode = typeof adsbCurrentAgent !== 'undefined' && adsbCurrentAgent !== 'local';
-            vdl2CurrentAgent = isAgentMode ? adsbCurrentAgent : null;
+            // Run where the panel's source says (by default, wherever ADS-B is set to run)
+            const source = panelSource('vdl2');
+            const isAgentMode = source !== 'local';
+            vdl2CurrentAgent = isAgentMode ? source : null;
 
-            // Warn if using same device as ADS-B (only for local mode)
-            if (!isAgentMode && isTracking && adsbActiveDevice !== null && device === String(adsbActiveDevice)) {
+            // Warn if using the same local device as ADS-B
+            if (!isAgentMode && isTracking && (adsbTrackingSource || 'local') === 'local' && adsbActiveDevice !== null && device === String(adsbActiveDevice)) {
                 const useAnyway = await AppFeedback.confirmAction({
                     title: 'SDR Device Conflict',
                     message: `ADS-B tracking is using SDR device ${adsbActiveDevice}. VDL2 uses VHF frequencies (~137 MHz) while ADS-B uses 1090 MHz. You need TWO separate SDR devices to receive both simultaneously. Continue to start VDL2 on device ${device} anyway.`,
@@ -4591,7 +4735,7 @@ sudo make install</code>
 
             // Determine endpoint based on agent mode
             const endpoint = isAgentMode
-                ? `/controller/agents/${adsbCurrentAgent}/vdl2/start`
+                ? `/controller/agents/${source}/vdl2/start`
                 : '/vdl2/start';
 
             fetch(endpoint, {
@@ -4608,6 +4752,7 @@ sudo make install</code>
                     isVdl2Running = true;
                     vdl2MessageCount = 0;
                     vdl2CollectedData = [];
+                    document.getElementById('vdl2SourceSelect').disabled = true;
                     document.getElementById('vdl2ToggleBtn').innerHTML = '&#9632; STOP VDL2';
                     document.getElementById('vdl2ToggleBtn').classList.add('active');
                     document.getElementById('vdl2PanelIndicator').classList.add('active');
@@ -4654,6 +4799,7 @@ sudo make install</code>
 
                 isVdl2Running = false;
                 vdl2CurrentAgent = null;
+                document.getElementById('vdl2SourceSelect').disabled = false;
                 document.getElementById('vdl2ToggleBtn').innerHTML = '&#9654; START VDL2';
                 document.getElementById('vdl2ToggleBtn').classList.remove('active');
                 document.getElementById('vdl2PanelIndicator').classList.remove('active');
@@ -4673,7 +4819,10 @@ sudo make install</code>
 
         // Sync VDL2 UI state (called by syncModeUI in agents.js)
         function setVdl2Running(running, agentId = null) {
+            // A status sync from one source must not overwrite VDL2 running on another
+            if (isVdl2Running && String(vdl2CurrentAgent) !== String(agentId)) return;
             isVdl2Running = running;
+            document.getElementById('vdl2SourceSelect').disabled = running;
             const btn = document.getElementById('vdl2ToggleBtn');
             const indicator = document.getElementById('vdl2PanelIndicator');
 
@@ -5024,6 +5173,7 @@ sudo make install</code>
                     if (data.running) {
                         isVdl2Running = true;
                         vdl2MessageCount = data.message_count || 0;
+                        document.getElementById('vdl2SourceSelect').disabled = true;
                         document.getElementById('vdl2Count').textContent = vdl2MessageCount;
                         document.getElementById('vdl2ToggleBtn').innerHTML = '&#9632; STOP VDL2';
                         document.getElementById('vdl2ToggleBtn').classList.add('active');
@@ -5732,11 +5882,11 @@ sudo make install</code>
     <!-- Help Modal -->
     {% include 'partials/help-modal.html' %}
 
-    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}?v={{ version }}&r=adsbvoice1"></script>
+    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/keyboard-shortcuts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/cheat-sheets.js') }}"></script>
     {% include 'partials/nav-utility-modals.html' %}
-    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}&r=maptheme17"></script>
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}"></script>
     <script src="{{ url_for('static', filename='js/map-utils.js') }}"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
@@ -5748,6 +5898,9 @@ sudo make install</code>
     <!-- Agent Manager -->
     <script src="{{ url_for('static', filename='js/core/agents.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/global-nav.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/strip-spark.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/reception-outline.js') }}"></script>
+    <script>StripSpark.attach('stripAircraftNow', { title: 'Aircraft in view, over the last 15 minutes' });</script>
     <script>
         // ADS-B specific agent integration
         let adsbCurrentAgent = 'local';
@@ -5827,6 +5980,48 @@ sudo make install</code>
             }
             updateAgentStatus();
             updateSourceIndicator();
+        }
+
+        // ACARS/VDL2 source (#264): "same as ADS-B" follows the header's agent;
+        // Local or an agent runs that decoder there instead, so it can run on a
+        // local SDR while ADS-B runs on an agent, or the other way round.
+        function fillPanelSourceSelect(select) {
+            const value = select.value;
+            select.innerHTML = '<option value="">Source: same as ADS-B</option><option value="local">Source: Local</option>';
+            (typeof agents !== 'undefined' ? agents : []).forEach(agent => {
+                const opt = document.createElement('option');
+                opt.value = agent.id;
+                opt.textContent = `Source: ${agent.name}`;
+                select.appendChild(opt);
+            });
+            select.value = Array.from(select.options).some(o => o.value === String(value)) ? value : '';
+        }
+
+        function panelFollowsPage(panel) {
+            return !document.getElementById(`${panel}SourceSelect`)?.value;
+        }
+
+        // 'local' or an agent id
+        function panelSource(panel) {
+            return document.getElementById(`${panel}SourceSelect`)?.value || adsbCurrentAgent;
+        }
+
+        // List the SDRs of the panel's source
+        async function onPanelSourceChange(panel) {
+            const source = panelSource(panel);
+            let devices = [];
+            if (source === 'local') {
+                devices = await getDetectedDevices();
+            } else {
+                try {
+                    const data = await (await fetch(`/controller/agents/${source}?refresh=true`)).json();
+                    const interfaces = data.agent?.interfaces || {};
+                    devices = interfaces.sdr_devices || interfaces.devices || [];
+                } catch (err) {
+                    console.error(`Failed to load ${panel} devices for agent ${source}:`, err);
+                }
+            }
+            populateCompositeDeviceSelect(document.getElementById(`${panel}DeviceSelect`), devices);
         }
 
         // Enable/disable airband controls based on local vs remote agent
@@ -6007,8 +6202,8 @@ sudo make install</code>
         function populateAdsbDeviceSelects(devices) {
             const adsbSelect = document.getElementById('adsbDeviceSelect');
             const airbandSelect = document.getElementById('airbandDeviceSelect');
-            const acarsSelect = document.getElementById('acarsDeviceSelect');
-            const vdl2Select = document.getElementById('vdl2DeviceSelect');
+            const acarsSelect = panelFollowsPage('acars') ? document.getElementById('acarsDeviceSelect') : null;
+            const vdl2Select = panelFollowsPage('vdl2') ? document.getElementById('vdl2DeviceSelect') : null;
 
             [adsbSelect, airbandSelect, acarsSelect, vdl2Select].forEach(select => {
                 if (!select) return;

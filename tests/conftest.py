@@ -1,8 +1,10 @@
 """Pytest configuration and fixtures."""
 
 import contextlib
+import operator
 import os
 import sqlite3
+import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -12,14 +14,66 @@ import pytest
 # test mocks (e.g. a patched subprocess.Popen catching its pkill call)
 os.environ.setdefault("INTERCEPT_SKIP_DEFERRED_INIT", "1")
 
-from app import app as flask_app
-from routes import register_blueprints
+# A developer shell with auth disabled would make every gate test pass
+# against an open app. Tests control auth through fixtures instead.
+os.environ.pop("INTERCEPT_DISABLE_AUTH", None)
+
+# Keep the whole session off the developer's own database. Importing app runs
+# init_db(), which seeds users, and tests that emit observations or record
+# events would otherwise write to instance/intercept.db. Must precede the
+# app import; tests that patch DB_PATH for their own temp file still can.
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+import tempfile  # noqa: E402
+
+import utils.database as _database  # noqa: E402
+
+_SESSION_DB_DIR = tempfile.mkdtemp(prefix="intercept-tests-")
+_database.DB_DIR = type(_database.DB_DIR)(_SESSION_DB_DIR)
+_database.DB_PATH = _database.DB_DIR / "intercept.db"
+atexit.register(shutil.rmtree, _SESSION_DB_DIR, ignore_errors=True)
+
+# Never let a test signal processes outside its own children. A MagicMock pid
+# coerces to 1, and os.killpg(1, sig) is kill(-1, sig): SIGTERM to every
+# process the developer owns (desktop session, ssh, editor). pid/pgid 0 is the
+# test runner's own group. Refuse them all, loudly.
+_real_kill, _real_killpg = os.kill, os.killpg
+
+
+def _guarded_kill(pid, sig):
+    if operator.index(pid) in (0, 1, -1):
+        raise AssertionError(f"test tried os.kill({pid!r}, {sig!r}): would signal far outside the test")
+    return _real_kill(pid, sig)
+
+
+def _guarded_killpg(pgid, sig):
+    if operator.index(pgid) in (0, 1):
+        raise AssertionError(f"test tried os.killpg({pgid!r}, {sig!r}): kill(-1)/own group, refusing")
+    return _real_killpg(pgid, sig)
+
+
+os.kill, os.killpg = _guarded_kill, _guarded_killpg
+
+from app import app as flask_app  # noqa: E402
+from routes import register_blueprints  # noqa: E402
+
+
+def pytest_ignore_collect(collection_path, config):
+    """The browser smoke test (tests/smoke) runs only when asked for by path,
+    e.g. `pytest tests/smoke`. It drives the whole app in a browser, which
+    leaves state (caches) that other tests do not expect."""
+    if "smoke" in collection_path.parts and not any("smoke" in str(arg) for arg in config.args):
+        return True
+    return None
 
 
 @pytest.fixture(scope="session")
 def app():
-    """Create application for testing."""
-    os.environ["INTERCEPT_DISABLE_AUTH"] = "1"
+    """Create application for testing.
+
+    Authentication stays enabled. Tests that only care about route behaviour
+    use the logged-in `client`; tests of the gate itself use `anon_client`.
+    """
     flask_app.config["TESTING"] = True
     # Disable CSRF for tests
     flask_app.config["WTF_CSRF_ENABLED"] = False
@@ -31,7 +85,18 @@ def app():
 
 @pytest.fixture
 def client(app):
-    """Create test client."""
+    """A logged-in test client."""
+    c = app.test_client()
+    with c.session_transaction() as sess:
+        sess["logged_in"] = True
+        sess["username"] = "admin"
+        sess["role"] = "admin"
+    return c
+
+
+@pytest.fixture
+def anon_client(app):
+    """An unauthenticated client, for testing the auth gate itself."""
     return app.test_client()
 
 
@@ -177,3 +242,187 @@ def fake_process():
         return proc
 
     return _make
+
+
+@pytest.fixture
+def tscm_survey():
+    """A complete TSCM survey, as the report routes would assemble it.
+
+    Returns keyword arguments for utils.tscm.reports.generate_report(). The
+    device profiles and timelines are built from the real correlation and
+    timeline classes and serialised with their own to_dict(), so the shapes
+    cannot drift from what the routes pass in production.
+
+    Five devices across three protocols: two high interest (an AirTag seen
+    during the meeting, a persistent 433 MHz carrier), two needing review
+    (an unknown audio-capable speaker, a hidden-SSID access point) and one
+    informational (the site's known printer).
+
+    Two clocks, as in production: the sweep record's times are UTC, as
+    SQLite's CURRENT_TIMESTAMP stores them; device and meeting times are
+    local, as the correlation engine records datetime.now(). The sweep runs
+    09:00-10:30 UTC, which is 10:00-11:30 local in September (BST).
+    """
+    from datetime import datetime, timedelta
+
+    from utils.tscm.advanced import DeviceTimeline
+    from utils.tscm.correlation import DeviceProfile, IndicatorType
+
+    start = datetime(2026, 9, 24, 10, 0, 0)  # local
+
+    def profile(identifier, protocol, name, indicators, rssi, seen_minutes, count, **extra):
+        p = DeviceProfile(identifier=identifier, protocol=protocol, name=name, **extra)
+        for kind, description in indicators:
+            p.add_indicator(kind, description)
+        p.first_seen = start + timedelta(minutes=5)
+        p.last_seen = p.first_seen + timedelta(minutes=seen_minutes)
+        p.detection_count = count
+        p.rssi_samples = [(p.first_seen + timedelta(minutes=i), rssi) for i in range(min(count, 10))]
+        return p
+
+    profiles = [
+        profile(
+            "4C:E6:76:12:34:56",
+            "bluetooth",
+            None,
+            [
+                (IndicatorType.AIRTAG_DETECTED, "Apple AirTag advertisement"),
+                (IndicatorType.PERSISTENT, "Present for most of the sweep"),
+                (IndicatorType.MEETING_CORRELATED, "First seen during the board meeting"),
+            ],
+            rssi=-48,
+            seen_minutes=80,
+            count=40,
+            tracker_type="airtag",
+        ),
+        profile(
+            "433.920",
+            "rf",
+            "433.92 MHz carrier",
+            [
+                (IndicatorType.NARROWBAND_SIGNAL, "Narrowband emission"),
+                (IndicatorType.ALWAYS_ON_CARRIER, "Carrier present throughout"),
+                (IndicatorType.PERSISTENT, "Present for most of the sweep"),
+            ],
+            rssi=-61,
+            seen_minutes=85,
+            count=30,
+            frequency=433.92,
+        ),
+        profile(
+            "F0:12:34:AB:CD:EF",
+            "bluetooth",
+            "JBL Flip 5",
+            [
+                (IndicatorType.AUDIO_CAPABLE, "Advertises an audio service"),
+                (IndicatorType.UNKNOWN_DEVICE, "Not in the baseline"),
+            ],
+            rssi=-74,
+            seen_minutes=2,
+            count=2,
+        ),
+        profile(
+            "02:11:22:33:44:55",
+            "wifi",
+            None,
+            [
+                (IndicatorType.HIDDEN_IDENTITY, "Hidden SSID"),
+                (IndicatorType.UNKNOWN_DEVICE, "Not in the baseline"),
+            ],
+            rssi=-66,
+            seen_minutes=60,
+            count=12,
+            is_hidden=True,
+        ),
+        profile("00:1B:A9:77:88:99", "wifi", "Office Printer", [], rssi=-58, seen_minutes=85, count=50),
+    ]
+    profiles[4].known_device = True
+    profiles[4].known_device_name = "Reception printer"
+
+    def timeline(p, rssi_min, rssi_max, pattern, meeting):
+        return DeviceTimeline(
+            identifier=p.identifier,
+            protocol=p.protocol,
+            name=p.name,
+            first_seen=p.first_seen,
+            last_seen=p.last_seen,
+            total_observations=p.detection_count,
+            presence_ratio=0.9,
+            rssi_min=rssi_min,
+            rssi_max=rssi_max,
+            rssi_mean=(rssi_min + rssi_max) / 2,
+            rssi_stability=0.8,
+            appears_stationary=pattern == "stationary",
+            movement_pattern=pattern,
+            meeting_correlated=meeting,
+            meeting_observations=6 if meeting else 0,
+        ).to_dict()
+
+    timelines = [
+        timeline(profiles[0], -52, -45, "stationary", True),
+        timeline(profiles[1], -63, -59, "stationary", False),
+        timeline(profiles[2], -78, -70, "mobile", False),
+        timeline(profiles[3], -69, -63, "stationary", False),
+        timeline(profiles[4], -60, -56, "stationary", False),
+    ]
+
+    return {
+        "sweep_id": 42,
+        "sweep_data": {
+            "id": 42,
+            "baseline_id": 7,
+            "started_at": "2026-09-24 09:00:00",
+            "completed_at": "2026-09-24 10:30:00",
+            "status": "completed",
+            "sweep_type": "standard",
+            "results": {"wifi_count": 14, "wifi_client_count": 9, "bt_count": 23, "rf_count": 4},
+            "anomalies": [],
+            "threats_found": 2,
+        },
+        "device_profiles": [p.to_dict() for p in profiles],
+        "capabilities": {
+            "wifi": {"mode": "monitor", "interface": "wlan1", "limitations": []},
+            "bluetooth": {"mode": "bluez", "adapter": "hci0", "limitations": []},
+            "rf": {"device_type": "rtlsdr", "available": True, "limitations": ["No coverage above 1.7 GHz"]},
+            "all_limitations": ["No coverage above 1.7 GHz", "Single-antenna Bluetooth; no direction finding"],
+        },
+        "timelines": timelines,
+        "baseline_diff": {
+            "baseline_id": 7,
+            "summary": {"new_devices": 3, "missing_devices": 1, "changed_devices": 0},
+        },
+        "meeting_summaries": [
+            {
+                "name": "Board meeting",
+                "start_time": "2026-09-24T10:30:00",
+                "end_time": "2026-09-24T11:15:00",
+                "duration_minutes": 45,
+                "devices_first_seen": 1,
+                "behavior_changes": 0,
+                "high_interest_devices": 1,
+            }
+        ],
+        "site_name": "Head Office, 3rd floor boardroom",
+        "examiner_name": "A. Examiner",
+    }
+
+
+# Peak memory for the whole run. A MagicMock standing in for a queue once
+# leaked 16 GB here and went unnoticed for months. A full run peaks near
+# 350 MB (each CI shard near 270 MB), so a real leak cannot hide under 1 GB.
+RSS_CEILING_MB = int(os.environ.get("INTERCEPT_TEST_RSS_CEILING_MB", "1024"))
+
+
+def pytest_sessionfinish(session, exitstatus):
+    try:
+        import resource
+    except ImportError:  # Windows
+        return
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    peak_mb = peak / (1024 * 1024) if sys.platform == "darwin" else peak / 1024  # bytes on macOS, KiB on Linux
+    if peak_mb > RSS_CEILING_MB:
+        reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+        message = f"peak RSS {peak_mb:.0f} MB exceeds the {RSS_CEILING_MB} MB ceiling (memory leak?)"
+        if reporter:
+            reporter.write_line(f"FAILED: {message}", red=True, bold=True)
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED

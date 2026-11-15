@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import os
 import queue
 import shutil
@@ -14,6 +15,8 @@ import threading
 import time
 from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
+from pathlib import Path
 from typing import Any
 
 from flask import Blueprint, Response, jsonify, make_response, render_template, request
@@ -62,13 +65,20 @@ from utils.constants import (
     SSE_KEEPALIVE_INTERVAL,
     SSE_QUEUE_TIMEOUT,
 )
-from utils.event_pipeline import process_event
+from utils.event_pipeline import process_event, submit
 from utils.flight_correlator import get_flight_correlator
 from utils.logging import adsb_logger as logger
-from utils.process import cleanup_stale_dump1090, clear_dump1090_pid, write_dump1090_pid
+from utils.process import cleanup_stale_dump1090, clear_dump1090_pid, terminate_together, write_dump1090_pid
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import format_sse
-from utils.validation import validate_device_index, validate_gain, validate_rtl_tcp_host, validate_rtl_tcp_port
+from utils.validation import (
+    validate_device_index,
+    validate_gain,
+    validate_ppm,
+    validate_rtl_tcp_host,
+    validate_rtl_tcp_port,
+)
 
 adsb_bp = Blueprint("adsb", __name__, url_prefix="/adsb")
 
@@ -131,6 +141,23 @@ def _parse_sbs_timestamp(date_str: str | None, time_str: str | None) -> datetime
             return parsed.replace(tzinfo=timezone.utc)
         except ValueError:
             continue
+    return None
+
+
+def _sbs_on_ground(msg_type: str, parts: list[str]) -> bool | None:
+    """Whether an SBS message says the aircraft is on the ground.
+
+    Field 22 (IsOnGround) is -1 on the ground and 0 airborne, and empty when
+    the message does not say; a surface position (MSG,2) is on the ground.
+    None when the message does not tell.
+    """
+    if msg_type == "2":
+        return True
+    flag = parts[21].strip() if len(parts) > 21 else ""
+    if flag == "-1":
+        return True
+    if flag == "0":
+        return False
     return None
 
 
@@ -451,7 +478,9 @@ def _build_export_csv(
 
 
 def _broadcast_adsb_update(payload: dict[str, Any]) -> None:
-    """Fan out a payload to all active ADS-B SSE subscribers."""
+    """Fan out a payload to all active ADS-B SSE subscribers, and send it
+    through the event pipeline once, whether or not any are connected."""
+    submit("adsb", payload, payload.get("type"))
     with _adsb_stream_subscribers_lock:
         subscribers = tuple(_adsb_stream_subscribers)
 
@@ -587,6 +616,73 @@ def check_dump1090_service():
     except OSError:
         pass
     return None
+
+
+# dump1090 aircraft.json field -> our aircraft dict field (Enhanced Mode-S /
+# Comm-B "cockpit" data that the SBS port does not carry).
+_EHS_FIELD_MAP = {
+    "roll": "roll",              # bank angle, deg (+ = right)
+    "mag_heading": "mag_heading",
+    "true_heading": "true_heading",
+    "ias": "ias",                # indicated airspeed, kt
+    "tas": "tas",                # true airspeed, kt
+    "mach": "mach",
+    "nav_heading": "sel_heading",  # autopilot selected heading
+    "nav_qnh": "qnh",
+}
+_ehs_reader_thread = None
+_ehs_reader_lock = threading.Lock()
+
+
+def start_ehs_json_reader():
+    """Start the background reader that enriches aircraft with Enhanced Mode-S
+    fields from dump1090's aircraft.json (idempotent)."""
+    global _ehs_reader_thread
+    with _ehs_reader_lock:
+        if _ehs_reader_thread and _ehs_reader_thread.is_alive():
+            return
+        _ehs_reader_thread = threading.Thread(target=_ehs_json_loop, name="adsb-ehs-json", daemon=True)
+        _ehs_reader_thread.start()
+
+
+def _merge_ehs_aircraft(a: dict) -> bool:
+    """Merge one aircraft.json record's Enhanced Mode-S fields onto the matching
+    tracked aircraft. Returns True if a tracked aircraft was enriched."""
+    hexid = str(a.get("hex") or "").upper().strip()
+    if not hexid:
+        return False
+    existing = app_module.adsb_aircraft.get(hexid)
+    if not existing:
+        return False  # enrich only aircraft already tracked via SBS
+    ehs = {dst: a[src] for src, dst in _EHS_FIELD_MAP.items() if a.get(src) is not None}
+    sel = a.get("nav_altitude_mcp")
+    if sel is None:
+        sel = a.get("nav_altitude_fms")
+    if sel is not None:
+        ehs["sel_altitude"] = sel  # autopilot selected altitude, ft
+    if not ehs:
+        return False
+    existing.update(ehs)
+    existing["ehs"] = True
+    app_module.adsb_aircraft.set(hexid, existing)
+    return True
+
+
+def _ehs_json_loop():
+    """Read dump1090's aircraft.json ~1 Hz and merge Comm-B/EHS fields onto
+    already-tracked aircraft. Best-effort: absent file/fields are ignored."""
+    from utils.sdr.rtlsdr import DUMP1090_JSON_DIR
+
+    path = os.path.join(DUMP1090_JSON_DIR, "aircraft.json")
+    while app_module.adsb_process and app_module.adsb_process.poll() is None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            for a in data.get("aircraft", []):
+                _merge_ehs_aircraft(a)
+        except (FileNotFoundError, json.JSONDecodeError, OSError, ValueError):
+            pass
+        time.sleep(1.0)
 
 
 def parse_sbs_stream(service_addr):
@@ -831,6 +927,10 @@ def parse_sbs_stream(service_addr):
                                 except (ValueError, TypeError):
                                     pass
 
+                        on_ground = _sbs_on_ground(msg_type, parts)
+                        if on_ground is not None:
+                            aircraft["on_ground"] = on_ground
+
                         app_module.adsb_aircraft.set(icao, aircraft)
                         pending_updates.add(icao)
                         adsb_messages_received += 1
@@ -977,6 +1077,7 @@ def start_adsb():
             ), 409
 
     data = request.get_json(silent=True) or {}
+    data = apply_device_defaults(data)
     start_source = data.get("source")
     started_by = request.remote_addr
 
@@ -984,6 +1085,7 @@ def start_adsb():
     try:
         gain = int(validate_gain(data.get("gain", "40")))
         device = validate_device_index(data.get("device", "0"))
+        ppm = validate_ppm(data.get("ppm", "0"))
     except ValueError as e:
         return api_error(str(e), 400)
 
@@ -1090,7 +1192,7 @@ def start_adsb():
     # Build ADS-B decoder command
     bias_t = data.get("bias_t", False)
     adsb_bias_t_active = bias_t
-    cmd = builder.build_adsb_command(device=sdr_device, gain=float(gain), bias_t=bias_t)
+    cmd = builder.build_adsb_command(device=sdr_device, gain=float(gain), bias_t=bias_t, ppm=ppm or None)
 
     # Ensure we use the resolved binary path for all SDR types
     cmd[0] = dump1090_path
@@ -1177,7 +1279,9 @@ def start_adsb():
             if stderr_output and len(stderr_output) < 300:
                 full_msg += f" (Details: {stderr_output})"
 
-            return jsonify({"status": "error", "error_type": error_type, "message": full_msg})
+            return jsonify({"status": "error", "error_type": error_type, "message": full_msg}), (
+                409 if error_type == "DEVICE_BUSY" else 503
+            )
 
         # dump1090 is still running but SBS port never came up — device may be
         # held by a stale process from a previous mode.  Kill it so the USB
@@ -1209,11 +1313,16 @@ def start_adsb():
                         "Please wait a moment and try again."
                     ),
                 }
-            )
+            ), 409
 
         adsb_using_service = True
         thread = threading.Thread(target=parse_sbs_stream, args=(f"localhost:{ADSB_SBS_PORT}",), daemon=True)
         thread.start()
+
+        # If dump1090 is emitting aircraft.json, enrich tracked aircraft with
+        # Enhanced Mode-S / cockpit fields from it (best-effort).
+        if "--write-json" in cmd:
+            start_ehs_json_reader()
 
         session = _record_session_start(
             device_index=device,
@@ -1242,18 +1351,9 @@ def stop_adsb():
 
     with app_module.adsb_lock:
         if app_module.adsb_process:
-            try:
-                # Kill the entire process group to ensure all child processes are terminated
-                pgid = os.getpgid(app_module.adsb_process.pid)
-                os.killpg(pgid, 15)  # SIGTERM
-                app_module.adsb_process.wait(timeout=ADSB_TERMINATE_TIMEOUT)
-            except (subprocess.TimeoutExpired, ProcessLookupError, OSError):
-                try:
-                    # Force kill if terminate didn't work
-                    pgid = os.getpgid(app_module.adsb_process.pid)
-                    os.killpg(pgid, 9)  # SIGKILL
-                except (ProcessLookupError, OSError):
-                    pass
+            # The whole process group, and waited for: dump1090 must have let
+            # go of the dongle before bias-T is switched off and it is released.
+            terminate_together([app_module.adsb_process], timeout=ADSB_TERMINATE_TIMEOUT)
             app_module.adsb_process = None
             clear_dump1090_pid()
             logger.info("ADS-B process stopped")
@@ -1305,8 +1405,6 @@ def stream_adsb():
                 try:
                     msg = client_queue.get(timeout=SSE_QUEUE_TIMEOUT)
                     last_keepalive = time.time()
-                    with contextlib.suppress(Exception):
-                        process_event("adsb", msg, msg.get("type"))
                     yield format_sse(msg)
                 except queue.Empty:
                     now = time.time()
@@ -1335,6 +1433,76 @@ def adsb_dashboard():
         default_longitude=DEFAULT_LONGITUDE,
         embedded=embedded,
     )
+
+
+@adsb_bp.route("/instruments")
+def adsb_instruments():
+    """Pop-out instrument panel for a single aircraft.
+
+    A standalone glass-panel window driven by the live ADS-B feed
+    (/adsb/aircraft): airspeed (ground speed), altimeter, heading/track,
+    vertical speed and a derived turn indicator.
+    """
+    icao = request.args.get("icao", "").upper()
+    return render_template("adsb_instruments.html", icao=icao)
+
+
+_ATC_DATA_PATH = Path(__file__).resolve().parent.parent / "static" / "data" / "atc_frequencies.json"
+
+
+@lru_cache(maxsize=1)
+def _load_atc_airports() -> list[dict]:
+    """Load the bundled ATC-frequency dataset once (built by
+    scripts/build_atc_frequencies.py from OurAirports public-domain data)."""
+    try:
+        return json.loads(_ATC_DATA_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _haversine_nm(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    r = 3440.065  # nautical miles
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return r * 2 * math.asin(math.sqrt(a))
+
+
+@adsb_bp.route("/nearest-airband")
+def nearest_airband() -> Response:
+    """Nearest airports (with TWR/APP/ATIS frequencies) to a lat/lon.
+
+    Used by the dashboard to tune the airband receiver to the ATC frequency
+    relevant to a selected aircraft's position (issue #271).
+    """
+    try:
+        lat = float(request.args["lat"])
+        lon = float(request.args["lon"])
+    except (KeyError, ValueError):
+        return api_error("lat and lon query parameters are required", 400)
+    try:
+        radius_nm = float(request.args.get("radius_nm", 60))
+    except ValueError:
+        radius_nm = 60.0
+
+    within = []
+    for ap in _load_atc_airports():
+        d = _haversine_nm(lat, lon, ap["lat"], ap["lon"])
+        if d <= radius_nm:
+            within.append((d, ap))
+    within.sort(key=lambda x: x[0])
+
+    airports = [
+        {
+            "ident": ap["ident"],
+            "name": ap["name"],
+            "distance_nm": round(d, 1),
+            "freqs": ap["freqs"],
+        }
+        for d, ap in within[:5]
+    ]
+    return jsonify({"count": len(airports), "airports": airports})
 
 
 @adsb_bp.route("/history")
@@ -1421,6 +1589,53 @@ def adsb_history_aircraft():
         return jsonify({"aircraft": rows, "count": len(rows)})
     except Exception as exc:
         logger.warning("ADS-B history aircraft query failed: %s", exc)
+        return api_error("History database unavailable", 503)
+
+
+@adsb_bp.route("/history/traffic")
+def adsb_history_traffic():
+    """Traffic over the history window in equal buckets: distinct aircraft and
+    snapshots per bucket (adsb_snapshots) and messages (adsb_messages), oldest
+    first, for the summary sparklines and the traffic strip."""
+    if not ADSB_HISTORY_ENABLED or not PSYCOPG2_AVAILABLE:
+        return api_error("ADS-B history is disabled", 503)
+    _ensure_history_schema()
+
+    since_minutes = _parse_int_param(request.args.get("since_minutes"), 1440, 1, 10080)
+    buckets = _parse_int_param(request.args.get("buckets"), 24, 1, 168)
+    window = f"{since_minutes} minutes"
+    bucket_seconds = since_minutes * 60 / buckets
+
+    # Bucket index from the window start. A row stamped exactly NOW() would
+    # fall one past the last bucket; LEAST keeps it in the last.
+    sql = """
+        SELECT LEAST(%s, FLOOR(EXTRACT(EPOCH FROM ({col} - (NOW() - INTERVAL %s))) / %s))::int AS bucket,
+               {counts}
+        FROM {table}
+        WHERE {col} >= NOW() - INTERVAL %s
+        GROUP BY 1
+    """
+    snapshots_sql = sql.format(
+        col="captured_at", table="adsb_snapshots", counts="COUNT(DISTINCT icao) AS aircraft, COUNT(*) AS snapshots"
+    )
+    messages_sql = sql.format(col="received_at", table="adsb_messages", counts="COUNT(*) AS messages")
+    params = (buckets - 1, window, bucket_seconds, window)
+
+    series = {name: [0] * buckets for name in ("aircraft", "snapshots", "messages")}
+    try:
+        with _get_history_connection() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(snapshots_sql, params)
+            for row in cur.fetchall():
+                if 0 <= row["bucket"] < buckets:
+                    series["aircraft"][row["bucket"]] = row["aircraft"]
+                    series["snapshots"][row["bucket"]] = row["snapshots"]
+            cur.execute(messages_sql, params)
+            for row in cur.fetchall():
+                if 0 <= row["bucket"] < buckets:
+                    series["messages"][row["bucket"]] = row["messages"]
+        return jsonify({"since_minutes": since_minutes, "buckets": buckets, "bucket_seconds": bucket_seconds, **series})
+    except Exception as exc:
+        logger.warning("ADS-B history traffic query failed: %s", exc)
         return api_error("History database unavailable", 503)
 
 

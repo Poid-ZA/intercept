@@ -15,23 +15,25 @@ import subprocess
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from subprocess import PIPE
-from typing import Any
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, Response, jsonify, render_template, request
 
 import app as app_module
+from config import DEFAULT_LATITUDE, DEFAULT_LONGITUDE, SHARED_OBSERVER_LOCATION_ENABLED
 from utils.constants import (
     PROCESS_START_WAIT,
     PROCESS_TERMINATE_TIMEOUT,
     SSE_KEEPALIVE_INTERVAL,
     SSE_QUEUE_TIMEOUT,
 )
+from utils.dependencies import install_hint
 from utils.event_pipeline import process_event
 from utils.logging import sensor_logger as logger
 from utils.responses import api_error, api_success
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
@@ -46,6 +48,7 @@ aprs_bp = Blueprint("aprs", __name__, url_prefix="/aprs")
 # Track which SDR device is being used
 aprs_active_device: int | None = None
 aprs_active_sdr_type: str | None = None
+aprs_active_frequency: str | None = None
 
 # APRS frequencies by region (MHz)
 APRS_FREQUENCIES = {
@@ -180,7 +183,7 @@ def parse_aprs_packet(raw_packet: str) -> dict | None:
             "callsign": callsign,
             "path": path,
             "raw": raw_packet,
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         }
 
         # Extract destination from path (first element before any comma)
@@ -1518,7 +1521,7 @@ def stream_aprs_output(master_fd: int, rtl_process: subprocess.Popen, decoder_pr
                             meter_msg = {
                                 "type": "meter",
                                 "level": audio_level,
-                                "ts": datetime.utcnow().isoformat() + "Z",
+                                "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
                             }
                             app_module.aprs_queue.put(meter_msg)
                         continue  # Audio level lines are not packets
@@ -1608,6 +1611,19 @@ def stream_aprs_output(master_fd: int, rtl_process: subprocess.Popen, decoder_pr
             aprs_active_sdr_type = None
 
 
+@aprs_bp.route("/dashboard")
+def aprs_dashboard() -> Response:
+    """Popout APRS tracking dashboard."""
+    embedded = request.args.get("embedded", "false") == "true"
+    return render_template(
+        "aprs_dashboard.html",
+        shared_observer_location=SHARED_OBSERVER_LOCATION_ENABLED,
+        default_latitude=DEFAULT_LATITUDE,
+        default_longitude=DEFAULT_LONGITUDE,
+        embedded=embedded,
+    )
+
+
 @aprs_bp.route("/tools")
 def check_aprs_tools() -> Response:
     """Check for APRS decoding tools."""
@@ -1639,6 +1655,7 @@ def aprs_status() -> Response:
     return jsonify(
         {
             "running": running,
+            "frequency": aprs_active_frequency if running else None,
             "packet_count": aprs_packet_count,
             "station_count": aprs_station_count,
             "last_packet_time": aprs_last_packet_time,
@@ -1718,7 +1735,7 @@ def aprs_data() -> Response:
 def start_aprs() -> Response:
     """Start APRS decoder."""
     global aprs_packet_count, aprs_station_count, aprs_last_packet_time, aprs_stations
-    global aprs_active_device, aprs_active_sdr_type
+    global aprs_active_device, aprs_active_sdr_type, aprs_active_frequency
 
     with app_module.aprs_lock:
         if app_module.aprs_process and app_module.aprs_process.poll() is None:
@@ -1732,6 +1749,7 @@ def start_aprs() -> Response:
         return api_error("No APRS decoder found. Install direwolf or multimon-ng", 400)
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate inputs
     try:
@@ -1753,7 +1771,7 @@ def start_aprs() -> Response:
 
     if sdr_type == SDRType.RTL_SDR:
         if find_rtl_fm() is None:
-            return api_error("rtl_fm not found. Install with: sudo apt install rtl-sdr", 400)
+            return api_error(f"rtl_fm not found. {install_hint('rtl_fm')}", 400)
     else:
         if find_rx_fm() is None:
             return api_error(f"rx_fm not found. Install SoapySDR tools for {sdr_type.value}.", 400)
@@ -1937,6 +1955,7 @@ def start_aprs() -> Response:
         app_module.aprs_process = decoder_process
         app_module.aprs_rtl_process = rtl_process
         app_module.aprs_master_fd = master_fd
+        aprs_active_frequency = frequency
 
         # Start background thread to read decoder output and push to queue
         thread = threading.Thread(
@@ -1985,7 +2004,7 @@ def stop_aprs() -> Response:
             processes_to_stop.append(app_module.aprs_process)
 
         if not processes_to_stop:
-            return api_error("APRS decoder not running", 400)
+            return jsonify({"status": "not_running"})
 
         # Release SDR device immediately so status panel reflects the
         # change without waiting for process termination.
@@ -2027,16 +2046,12 @@ def stop_aprs() -> Response:
 def stream_aprs() -> Response:
     """SSE stream for APRS packets."""
 
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("aprs", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.aprs_queue,
             channel_key="aprs",
             timeout=SSE_QUEUE_TIMEOUT,
             keepalive_interval=SSE_KEEPALIVE_INTERVAL,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )
@@ -2070,7 +2085,7 @@ def scan_aprs_spectrum() -> Response:
     """
     rtl_power_path = find_rtl_power()
     if not rtl_power_path:
-        return api_error("rtl_power not found. Install with: sudo apt install rtl-sdr", 400)
+        return api_error(f"rtl_power not found. {install_hint('rtl_power')}", 400)
 
     # Get parameters from JSON body or query args
     if request.is_json:

@@ -12,6 +12,7 @@
         <div class="settings-tabs" role="tablist" aria-label="Settings sections">
             <button type="button" class="settings-tab active" data-tab="offline" onclick="switchSettingsTab('offline')" role="tab" aria-controls="settings-offline" aria-selected="true">Offline</button>
             <button type="button" class="settings-tab" data-tab="location" onclick="switchSettingsTab('location')" role="tab" aria-controls="settings-location" aria-selected="false">Location</button>
+            <button type="button" class="settings-tab" data-tab="sdr" onclick="switchSettingsTab('sdr')" role="tab" aria-controls="settings-sdr" aria-selected="false">SDR</button>
             <button type="button" class="settings-tab" data-tab="display" onclick="switchSettingsTab('display')" role="tab" aria-controls="settings-display" aria-selected="false">Display</button>
             <button type="button" class="settings-tab" data-tab="updates" onclick="switchSettingsTab('updates')" role="tab" aria-controls="settings-updates" aria-selected="false">Updates</button>
             <button type="button" class="settings-tab" data-tab="tools" onclick="switchSettingsTab('tools')" role="tab" aria-controls="settings-tools" aria-selected="false">Tools</button>
@@ -72,11 +73,11 @@
                         <span class="settings-label-desc">Map background imagery</span>
                     </div>
                     <select id="tileProvider" class="settings-select" onchange="Settings.setTileProvider(this.value)">
-                        <option value="cartodb_dark_cyan">Intercept Default</option>
+                        <option value="cartodb_dark_cyan">Intercept Cyber</option>
                         <option value="cartodb_dark">CartoDB Dark</option>
                         <option value="openstreetmap">OpenStreetMap</option>
                         <option value="cartodb_light">CartoDB Positron</option>
-                        <option value="esri_world">ESRI World Imagery</option>
+                        <option value="esri_world">ESRI World Imagery (default)</option>
                         <option value="stadia_dark">Stadia Alidade Dark</option>
                         <option value="tactical">Stadia Tactical (minimal)</option>
                         <option value="custom">Custom URL</option>
@@ -99,6 +100,20 @@
                         <input type="text" id="stadiaKeyInput" class="settings-input"
                                placeholder="your-api-key-here"
                                onchange="Settings.setStadiaKey(this.value)">
+                    </div>
+                </div>
+                <div class="settings-row" id="cartoKeyRow" style="display: none;">
+                    <div class="settings-label" style="width: 100%;">
+                        <span class="settings-label-text">CARTO API Key</span>
+                        <span class="settings-label-desc">
+                            CARTO now watermarks map tiles without a key. Get a free key in about a
+                            minute (no account needed) at
+                            <a href="https://carto.com/basemaps/apikey/" target="_blank" style="color: var(--accent-cyan);">carto.com/basemaps/apikey</a>,
+                            then paste it below.
+                        </span>
+                        <input type="text" id="cartoKeyInput" class="settings-input"
+                               placeholder="your-api-key-here"
+                               onchange="Settings.setCartoKey(this.value)">
                     </div>
                 </div>
             </div>
@@ -178,19 +193,11 @@
                         Save Location
                     </button>
                 </div>
-            </div>
-
-            <div class="settings-group">
-                <div class="settings-group-title">Current Location</div>
-                <div id="currentLocationDisplay" style="padding: 12px; background: var(--bg-tertiary); border-radius: 6px; font-family: var(--font-mono); font-size: 12px;">
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-                        <span style="color: var(--text-dim);">Latitude</span>
-                        <span id="currentLatDisplay" style="color: var(--accent-cyan);">Not set</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between;">
-                        <span style="color: var(--text-dim);">Longitude</span>
-                        <span id="currentLonDisplay" style="color: var(--accent-cyan);">Not set</span>
-                    </div>
+                <!-- What is saved, which the fields above may differ from until Save -->
+                <div id="currentLocationDisplay" style="margin-top: 10px; font-size: 11px; color: var(--text-dim);">
+                    Saved:
+                    <span id="currentLatDisplay" style="color: var(--accent-cyan); font-family: var(--font-mono);">Not set</span>,
+                    <span id="currentLonDisplay" style="color: var(--accent-cyan); font-family: var(--font-mono);">Not set</span>
                 </div>
             </div>
 
@@ -201,6 +208,21 @@
         </div>
 
         <!-- Display Section -->
+        <div id="settings-sdr" class="settings-section">
+            <div class="settings-group">
+                <div class="settings-group-title">SDR Devices</div>
+                <p style="color: var(--text-dim); margin-bottom: 15px; font-size: 12px;">
+                    Name each receiver and set its corrections. A mode uses the PPM, gain and bias-T
+                    set here whenever its own field is left blank. A value entered in the mode still wins.
+                </p>
+                <div id="settingsSdrDevices">
+                    <div style="text-align: center; padding: 30px; color: var(--text-dim);">
+                        Loading devices...
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <div id="settings-display" class="settings-section">
             <div class="settings-group">
                 <div class="settings-group-title">Visual Preferences</div>
@@ -257,6 +279,14 @@
                         <option value="24">24-hour</option>
                     </select>
                 </div>
+
+                <div class="settings-row">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Layout</span>
+                        <span class="settings-label-desc">Sections opened or collapsed, and views chosen (sky plot or globe, cards or table). Settings, presets and your location are kept.</span>
+                    </div>
+                    <button type="button" class="check-assets-btn" onclick="resetLayoutPreferences()">Reset layout</button>
+                </div>
             </div>
         </div>
 
@@ -312,10 +342,11 @@
             </div>
 
             <div class="settings-group" style="margin-top: 15px;">
-                <div class="settings-group-title">Quick Install (Debian/Ubuntu)</div>
-                <div style="background: var(--bg-tertiary); padding: 10px; border-radius: 4px; font-family: var(--font-mono); font-size: 10px; overflow-x: auto;">
-                    <div>sudo apt install rtl-sdr multimon-ng rtl-433 aircrack-ng bluez dump1090-mutability hcxdumptool hcxtools</div>
-                    <div style="margin-top: 5px;">pip install skyfield flask</div>
+                <div class="settings-group-title">Installing Everything</div>
+                <div style="font-size: 12px; color: var(--text-secondary);">
+                    Run <code>./setup.sh</code> from the iNTERCEPT directory. It detects your platform and
+                    installs the tools for the modes you choose. Each missing tool above shows the command for
+                    this machine.
                 </div>
                 <div style="margin-top: 10px; font-size: 11px; color: var(--text-dim);">
                     <strong>Note:</strong> ACARS decoding requires <code>acarsdec</code> which must be built from source.
@@ -428,6 +459,129 @@
                 <div class="settings-group-title">Alert Feed <span id="alertsFeedCount" style="color: var(--text-dim); font-weight: 500;"></span></div>
                 <div id="alertsFeedList" class="settings-feed">
                     <div class="settings-feed-empty">No alerts yet</div>
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <div class="settings-group-title">Watchlists</div>
+                <p style="color: var(--text-dim); margin-bottom: 10px; font-size: 12px;">
+                    Lists of what you want to hear about, one entry per line. A trailing <code>*</code> matches the start.
+                    Every decoder is watched, whether or not its page is open.
+                </p>
+                <div class="settings-row" style="border-bottom: none; padding-top: 0;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Name</span>
+                    </div>
+                    <input type="text" id="watchlistName" class="settings-input" placeholder="Local traffic" style="width: 220px;">
+                </div>
+                <div class="settings-row" style="border-bottom: none;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Kind</span>
+                        <span class="settings-label-desc" id="watchlistKindHint">ICAO hex, registration or callsign (ADS-B, ACARS, VDL2)</span>
+                    </div>
+                    <select id="watchlistKind" class="settings-select" style="width: 220px;" onchange="AlertCenter.updateWatchlistKindHint()">
+                        <option value="aircraft">Aircraft</option>
+                        <option value="vessel">Ships</option>
+                        <option value="callsign">Callsigns</option>
+                        <option value="device">Devices (MAC)</option>
+                        <option value="frequency">Frequencies</option>
+                        <option value="keyword">Words in messages</option>
+                    </select>
+                </div>
+                <div class="settings-row" style="border-bottom: none; align-items: flex-start;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Entries</span>
+                    </div>
+                    <textarea id="watchlistEntries" class="settings-input" rows="4" style="width: 220px; resize: vertical; font-family: var(--font-mono);" placeholder="4840D6&#10;A6-EDA&#10;KLM*"></textarea>
+                </div>
+                <div class="settings-row" style="border-bottom: none; display: none;" id="watchlistToleranceRow">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Tolerance (kHz)</span>
+                        <span class="settings-label-desc">How far off an entry still matches</span>
+                    </div>
+                    <input type="number" id="watchlistTolerance" class="settings-input" min="0" step="0.5" value="5" style="width: 220px;">
+                </div>
+                <div class="settings-row" style="border-bottom: none;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Severity</span>
+                    </div>
+                    <select id="watchlistSeverity" class="settings-select" style="width: 220px;">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;">
+                    <button class="check-assets-btn" onclick="AlertCenter.saveWatchlist()">Save Watchlist</button>
+                    <button class="check-assets-btn" onclick="AlertCenter.clearWatchlistForm()">Clear</button>
+                </div>
+                <input type="hidden" id="watchlistEditingId" value="">
+                <div id="watchlistsList" class="settings-feed" style="margin-top: 10px;">
+                    <div class="settings-feed-empty">No watchlists yet</div>
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <div class="settings-group-title">Push Notifications</div>
+                <p style="color: var(--text-dim); margin-bottom: 10px; font-size: 12px;">
+                    Alerts from rules and watchlists are sent to every enabled channel. Tokens are stored on this server and never shown again.
+                </p>
+                <div class="settings-row" style="border-bottom: none; padding-top: 0;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Channel</span>
+                    </div>
+                    <select id="channelKind" class="settings-select" style="width: 220px;" onchange="AlertCenter.renderChannelFields()">
+                        <option value="ntfy">ntfy</option>
+                        <option value="telegram">Telegram bot</option>
+                        <option value="webhook">Webhook (JSON POST)</option>
+                    </select>
+                </div>
+                <div class="settings-row" style="border-bottom: none;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Name</span>
+                    </div>
+                    <input type="text" id="channelName" class="settings-input" placeholder="My phone" style="width: 220px;">
+                </div>
+                <div id="channelFields"></div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;">
+                    <button class="check-assets-btn" onclick="AlertCenter.saveChannel()">Add Channel</button>
+                    <button class="check-assets-btn" onclick="AlertCenter.testChannels()">Send Test Alert</button>
+                </div>
+                <div id="channelsList" class="settings-feed" style="margin-top: 10px;">
+                    <div class="settings-feed-empty">No channels yet</div>
+                </div>
+            </div>
+
+            <div class="settings-group">
+                <div class="settings-group-title">Limits</div>
+                <div class="settings-row" style="border-bottom: none; padding-top: 0;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Most pushes per hour</span>
+                        <span class="settings-label-desc">All rules and lists together; alerts over it stay in the feed as held back (0 = no limit)</span>
+                    </div>
+                    <input type="number" id="limitMaxPerHour" class="settings-input" min="0" step="1" style="width: 120px;">
+                </div>
+                <div class="settings-row" style="border-bottom: none;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Repeat after (minutes)</span>
+                        <span class="settings-label-desc">The same rule or entry on the same station alerts again only after this</span>
+                    </div>
+                    <input type="number" id="limitCooldown" class="settings-input" min="0" step="1" style="width: 120px;">
+                </div>
+                <div class="settings-row" style="border-bottom: none;">
+                    <div class="settings-label">
+                        <span class="settings-label-text">Quiet hours</span>
+                        <span class="settings-label-desc">Server time; nothing is pushed, the feed still lists it. May run over midnight.</span>
+                    </div>
+                    <div style="display:flex; gap:6px; align-items:center;">
+                        <input type="time" id="limitQuietStart" class="settings-input" style="width: 100px;">
+                        <span style="color: var(--text-dim);">to</span>
+                        <input type="time" id="limitQuietEnd" class="settings-input" style="width: 100px;">
+                    </div>
+                </div>
+                <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px;">
+                    <button class="check-assets-btn" onclick="AlertCenter.saveLimits()">Save Limits</button>
                 </div>
             </div>
 

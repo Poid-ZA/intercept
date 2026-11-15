@@ -37,27 +37,6 @@ window.INTERCEPT_MODES = {
             SubGhz.init();
         },
     },
-    aprs: {
-        label: 'APRS', indicator: 'APRS', outputTitle: 'APRS Tracker', group: 'tracking',
-        elementId: 'aprsMode',
-        visuals: true,
-        destroy: () => {
-            if (typeof destroyAprsMode === 'function') {
-                destroyAprsMode();
-            } else if (aprsEventSource) {
-                aprsEventSource.close();
-                aprsEventSource = null;
-            }
-        },
-        init: () => {
-            checkAprsTools();
-            initAprsMap();
-            // Fix map sizing on mobile after container becomes visible
-            setTimeout(() => {
-                if (aprsMap) aprsMap.invalidateSize();
-            }, 100);
-        },
-    },
     gps: {
         label: 'GPS', indicator: 'GPS', outputTitle: 'GPS Receiver', group: 'tracking',
         elementId: 'gpsMode',
@@ -198,36 +177,29 @@ window.INTERCEPT_MODES = {
             WiFiLocate.init();
         },
     },
-    meshtastic: {
-        label: 'Meshtastic', indicator: 'MESHTASTIC', outputTitle: 'Meshtastic Mesh Monitor', group: 'wireless',
-        elementId: 'meshtasticMode',
-        visuals: true,
-        module: 'Meshtastic',
-        init: () => {
-            Meshtastic.init();
-            // Fix map sizing after container becomes visible
-            setTimeout(() => {
-                Meshtastic.invalidateMap();
-            }, 100);
-        },
-    },
-    meshcore: {
-        label: 'Meshcore', indicator: 'MESHCORE', outputTitle: 'Meshcore Mesh Monitor', group: 'wireless',
-        elementId: 'meshcoreMode',
-        visuals: true,
-        module: 'MeshCore',
-        init: () => {
-            MeshCore.init();
-            setTimeout(() => {
-                MeshCore.invalidateMap();
-            }, 100);
-        },
-    },
     tscm: {
         label: 'TSCM', indicator: 'TSCM', outputTitle: 'TSCM Counter-Surveillance', group: 'intel',
         elementId: 'tscmMode',
         visuals: true,
         destroy: () => { if (tscmEventSource) { tscmEventSource.close(); tscmEventSource = null; } },
+    },
+    tscmsurvey: {
+        label: 'TSCM Survey', indicator: 'TSCM SURVEY', outputTitle: 'TSCM Survey Workspace', group: 'intel',
+        elementId: 'tscmsurveyMode',
+        visuals: true,
+        module: 'TscmSurvey',
+        init: () => {
+            TscmSurvey.init();
+        },
+    },
+    activity: {
+        label: 'Activity', indicator: 'ACTIVITY', outputTitle: 'Activity Feed', group: 'intel',
+        elementId: 'activityMode',
+        visuals: true,
+        module: 'Activity',
+        init: () => {
+            Activity.init();
+        },
     },
     drone: {
         label: 'Drone Intel', indicator: 'DRONE', outputTitle: 'Drone Intelligence', group: 'intel',
@@ -284,6 +256,15 @@ window.INTERCEPT_MODES = {
         module: 'SystemHealth',
         init: () => {
             SystemHealth.init();
+        },
+    },
+    identity_management: {
+        label: 'Accounts Management', indicator: 'ACCOUNTS MANAGEMENT', outputTitle: 'Accounts Management Area', group: 'system',
+        elementId: 'identityManagementMode',
+        visuals: true,
+        module: 'IdentityManagementMode',
+        init: () => {
+            IdentityManagementMode.init();
         },
     },
     ook: {

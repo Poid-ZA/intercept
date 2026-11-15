@@ -20,12 +20,14 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request
 
 import app as app_module
-from utils.dependencies import get_tool_path
-from utils.event_pipeline import process_event
+from utils.constants import PROCESS_START_WAIT
+from utils.dependencies import get_tool_path, install_hint
 from utils.logging import pager_logger as logger
-from utils.process import register_process, unregister_process
+from utils.process import register_process, terminate_together, unregister_process
 from utils.responses import api_error
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
+from utils.sdr.rtlsdr import rtl_startup_error
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
@@ -273,6 +275,7 @@ def start_decoding() -> Response:
             return api_error("Already running", 409)
 
         data = request.json or {}
+        data = apply_device_defaults(data)
 
         # Validate inputs
         try:
@@ -376,7 +379,12 @@ def start_decoding() -> Response:
 
         multimon_path = get_tool_path("multimon-ng")
         if not multimon_path:
-            return api_error("multimon-ng not found", 400)
+            # The device was claimed above; a failed start must hand it back
+            # or every later start reports it busy.
+            if pager_active_device is not None:
+                app_module.release_sdr_device(pager_active_device, pager_active_sdr_type or "rtlsdr")
+                pager_active_device = None
+            return api_error(f"multimon-ng not found. {install_hint('multimon-ng')}", 400)
         multimon_cmd = [multimon_path, "-t", "raw"] + decoders + ["-f", "alpha", "-"]
 
         full_cmd = " ".join(rtl_cmd) + " | " + " ".join(multimon_cmd)
@@ -386,6 +394,12 @@ def start_decoding() -> Response:
             # Create pipe: rtl_fm | multimon-ng
             rtl_process = subprocess.Popen(rtl_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             register_process(rtl_process)
+
+            # rtl_fm that cannot open the device exits at once; report it
+            time.sleep(PROCESS_START_WAIT)
+            startup_error = rtl_startup_error("rtl_fm", rtl_process, sdr_device)
+            if startup_error:
+                raise RuntimeError(startup_error)
 
             # Start a thread to monitor rtl_fm stderr for errors
             def monitor_rtl_stderr():
@@ -469,30 +483,18 @@ def stop_decoding() -> Response:
 
     with app_module.process_lock:
         if app_module.current_process:
-            # Signal audio relay thread to stop
-            if hasattr(app_module.current_process, "_stop_relay"):
-                app_module.current_process._stop_relay.set()
+            process = app_module.current_process
+            # rtl_fm and multimon-ng together, waiting until both are gone.
+            # The audio relay keeps draining rtl_fm meanwhile: stopped first,
+            # it left rtl_fm blocked writing to a full pipe, deaf to SIGTERM
+            # until killed two seconds later.
+            terminate_together([getattr(process, "_rtl_process", None), process])
 
-            # Kill rtl_fm process first
-            if hasattr(app_module.current_process, "_rtl_process"):
-                try:
-                    app_module.current_process._rtl_process.terminate()
-                    app_module.current_process._rtl_process.wait(timeout=2)
-                except (subprocess.TimeoutExpired, OSError):
-                    with contextlib.suppress(OSError):
-                        app_module.current_process._rtl_process.kill()
-
-            # Close PTY master fd
-            if hasattr(app_module.current_process, "_master_fd"):
+            if hasattr(process, "_stop_relay"):
+                process._stop_relay.set()
+            if hasattr(process, "_master_fd"):
                 with contextlib.suppress(OSError):
-                    os.close(app_module.current_process._master_fd)
-
-            # Kill multimon-ng
-            app_module.current_process.terminate()
-            try:
-                app_module.current_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                app_module.current_process.kill()
+                    os.close(process._master_fd)
 
             app_module.current_process = None
 
@@ -554,16 +556,12 @@ def toggle_logging() -> Response:
 
 @pager_bp.route("/stream")
 def stream() -> Response:
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("pager", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.output_queue,
             channel_key="pager",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

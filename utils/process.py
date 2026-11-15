@@ -28,6 +28,21 @@ def register_process(process: subprocess.Popen) -> None:
         _spawned_processes.append(process)
 
 
+def drain_in_background(stream) -> None:
+    """Read and discard a pipe until it closes.
+
+    For tools that keep writing status to stderr (hackrf_transfer prints a
+    line a second): an unread pipe fills up and the tool blocks.
+    """
+
+    def _drain() -> None:
+        with contextlib.suppress(Exception):
+            while stream.read(4096):
+                pass
+
+    threading.Thread(target=_drain, daemon=True).start()
+
+
 def unregister_process(process: subprocess.Popen) -> None:
     """Unregister a process from cleanup list."""
     with _process_lock:
@@ -108,6 +123,69 @@ def safe_terminate(process: subprocess.Popen | None, timeout: float = 2.0) -> bo
         return False
 
 
+def _leads_group(process: subprocess.Popen) -> bool:
+    """Whether a process leads its own group (started with start_new_session)."""
+    try:
+        return os.getpgid(process.pid) == process.pid
+    except (ProcessLookupError, OSError):
+        return False
+
+
+def _signal_process(process: subprocess.Popen, sig: int, group: bool) -> None:
+    """Signal a process, or its whole group if it leads one, so a decoder's
+    children go with it."""
+    with contextlib.suppress(ProcessLookupError, OSError):
+        if group:
+            os.killpg(process.pid, sig)
+        else:
+            process.send_signal(sig)
+
+
+def terminate_together(
+    processes: list[subprocess.Popen | None], timeout: float = 2.0, kill_timeout: float = 2.0
+) -> list[subprocess.Popen]:
+    """Stop a mode's processes together, and wait until they are gone.
+
+    Every process gets SIGTERM at once and they share one deadline, rather
+    than each waiting its turn. Survivors get SIGKILL, and are waited for:
+    until a decoder has actually exited it still holds the SDR, and
+    releasing the device before then lets the next start fail as busy.
+    Returns the processes still alive afterwards (normally none).
+    """
+    procs = [p for p in processes if p is not None]
+    # Noted before signalling: once a leader has exited, its group can no
+    # longer be looked up from it, though its children may still be running.
+    leaders = {p.pid for p in procs if p.poll() is None and _leads_group(p)}
+    for process in procs:
+        if process.poll() is None:
+            _signal_process(process, signal.SIGTERM, process.pid in leaders)
+
+    deadline = time.monotonic() + timeout
+    for process in procs:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+    stubborn = [p for p in procs if p.poll() is None]
+    for process in stubborn:
+        _signal_process(process, signal.SIGKILL, process.pid in leaders)
+    # A leader that obeyed SIGTERM can leave children that did not
+    for pgid in leaders:
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+    deadline = time.monotonic() + kill_timeout
+    for process in stubborn:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=max(0.0, deadline - time.monotonic()))
+
+    for process in procs:
+        close_process_pipes(process)
+        unregister_process(process)
+    survivors = [p for p in procs if p.poll() is None]
+    for process in survivors:
+        logger.warning(f"Process {process.pid} did not exit after SIGKILL (stuck in the kernel, e.g. on USB)")
+    return survivors
+
+
 # Register cleanup handlers
 atexit.register(cleanup_all_processes)
 
@@ -155,12 +233,23 @@ if not _is_under_gunicorn():
 
 
 def cleanup_stale_processes() -> None:
-    """Kill any stale processes from previous runs (but not system services)."""
+    """Kill any stale processes from previous runs (but not system services).
+
+    Use SIGTERM first so decoders (rtl_433, multimon-ng, rtl_fm) can run
+    their cleanup handlers and release USB endpoints cleanly.  Only fall
+    back to SIGKILL via pkill -9 if a process does not respond to SIGTERM.
+    """
     # Note: dump1090 is NOT included here as users may run it as a system service
     processes_to_kill = ["rtl_adsb", "rtl_433", "multimon-ng", "rtl_fm"]
     for proc_name in processes_to_kill:
+        # First attempt graceful termination.
         with contextlib.suppress(subprocess.SubprocessError, OSError):
-            subprocess.run(["pkill", "-9", proc_name], capture_output=True)
+            subprocess.run(["pkill", proc_name], capture_output=True, timeout=2)
+        # Brief wait for processes that honour SIGTERM.
+        time.sleep(0.2)
+        # Force-kill any survivors.
+        with contextlib.suppress(subprocess.SubprocessError, OSError):
+            subprocess.run(["pkill", "-9", proc_name], capture_output=True, timeout=0.5)
 
 
 _DUMP1090_PID_FILE = Path(__file__).resolve().parent.parent / "instance" / "dump1090.pid"

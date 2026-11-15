@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/python-3.9+-blue.svg" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/python-3.10+-blue.svg" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-Apache--2.0-green.svg" alt="Apache 2.0 License">
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-lightgrey.svg" alt="Platform">
 </p>
@@ -124,6 +124,8 @@ docker compose --profile basic up -d --build
 
 > **Note:** Docker requires privileged mode for USB SDR access. SDR devices are passed through via `/dev/bus/usb`.
 
+> **Your data:** settings, users, alert rules, watchlists and decoded messages live in `./instance` on the host, so they survive `--build`. Upgrading from a compose file without that mount? Copy the old data out before rebuilding: `docker cp intercept:/app/instance ./instance`.
+
 For multi-architecture builds (amd64 + arm64 for Raspberry Pi), see `build-multiarch.sh` — it handles cross-compilation and registry push in one step.
 
 ### Environment Configuration
@@ -193,7 +195,9 @@ Checks installed tools, SDR devices, port availability, permissions, Python venv
 
 After starting, open **http://localhost:5050** in your browser.
 
-Default credentials: **admin / admin** — change these in `config.py` (`ADMIN_USERNAME` / `ADMIN_PASSWORD`) before exposing the app on a network.
+**There is no default password.** On first start, INTERCEPT generates one for the `admin` account, logs it, and writes it to `instance/.initial_password`. Log in with that, and you will be asked to set your own before the interface unlocks.
+
+To choose your own up front, set `INTERCEPT_ADMIN_PASSWORD` before first start. See [Security](docs/SECURITY.md#authentication) for details and for why this replaced the previous `admin`/`admin` default.
 
 ---
 

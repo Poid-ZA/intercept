@@ -14,7 +14,6 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request
 
 import app as app_module
-from utils.event_pipeline import process_event
 from utils.logging import sensor_logger as logger
 from utils.morse import (
     decode_morse_wav_file,
@@ -23,6 +22,7 @@ from utils.morse import (
 from utils.process import register_process, safe_terminate, unregister_process
 from utils.responses import api_error
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
@@ -250,6 +250,7 @@ def start_morse() -> Response:
     global morse_last_error, morse_session_id
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate detect_mode first — it determines frequency limits.
     try:
@@ -284,9 +285,16 @@ def start_morse() -> Response:
 
     sdr_type_str = data.get("sdr_type", "rtlsdr")
 
-    # Check for rtl_tcp (remote SDR) connection
+    # Check for rtl_tcp (remote SDR) connection. Validate before any state
+    # changes: a 400 after _set_state(STARTING) would wedge the lifecycle.
     rtl_tcp_host = data.get("rtl_tcp_host")
     rtl_tcp_port = data.get("rtl_tcp_port", 1234)
+    if rtl_tcp_host:
+        try:
+            rtl_tcp_host = validate_rtl_tcp_host(rtl_tcp_host)
+            rtl_tcp_port = validate_rtl_tcp_port(rtl_tcp_port)
+        except ValueError as e:
+            return api_error(str(e), 400)
 
     with app_module.morse_lock:
         if morse_state in {MORSE_STARTING, MORSE_RUNNING, MORSE_STOPPING}:
@@ -338,11 +346,6 @@ def start_morse() -> Response:
     # Create network or local SDR device
     network_sdr_device = None
     if rtl_tcp_host:
-        try:
-            rtl_tcp_host = validate_rtl_tcp_host(rtl_tcp_host)
-            rtl_tcp_port = validate_rtl_tcp_port(rtl_tcp_port)
-        except ValueError as e:
-            return api_error(str(e), 400)
         network_sdr_device = SDRFactory.create_network_device(rtl_tcp_host, rtl_tcp_port)
         logger.info(f"Using remote SDR: rtl_tcp://{rtl_tcp_host}:{rtl_tcp_port}")
 
@@ -401,7 +404,18 @@ def start_morse() -> Response:
         and detect_mode != "envelope"  # direct sampling is HF-only
         and float(freq) < 24.0
     )
-    direct_sampling_attempts: list[int | None] = [2, 1, None] if can_try_direct_sampling else [None]
+
+    def _direct_sampling_attempts_for(device_index: int) -> list[int | None]:
+        if not can_try_direct_sampling:
+            return [None]
+        # RTL-SDR Blog V4 receives HF through its built-in upconverter;
+        # forcing direct sampling bypasses it and the input goes deaf.
+        name = str(device_catalog.get(device_index, {}).get("name", ""))
+        if "blog v4" in name.lower():
+            return [None]
+        return [2, 1, None]
+
+    direct_sampling_attempts: list[int | None] = _direct_sampling_attempts_for(requested_device_index)
 
     runtime_config: dict[str, Any] = {
         "sample_rate": sample_rate,
@@ -454,13 +468,13 @@ def start_morse() -> Response:
             with contextlib.suppress(queue.Full):
                 control_q.put_nowait({"cmd": "shutdown"})
 
-        if rtl_proc is not None:
-            _close_pipe(getattr(rtl_proc, "stdout", None))
-            _close_pipe(getattr(rtl_proc, "stderr", None))
-
+        # Terminate before closing the pipes: close() blocks while a reader
+        # thread is mid-read on a silent pipe, and only process exit ends it.
         if rtl_proc is not None:
             safe_terminate(rtl_proc, timeout=0.4)
             unregister_process(rtl_proc)
+            _close_pipe(getattr(rtl_proc, "stdout", None))
+            _close_pipe(getattr(rtl_proc, "stderr", None))
 
         _join_thread(decoder_worker, timeout_s=0.35)
         _join_thread(stderr_worker, timeout_s=0.35)
@@ -504,6 +518,7 @@ def start_morse() -> Response:
             runtime_config.pop("startup_waiting", None)
             runtime_config.pop("startup_warning", None)
 
+            direct_sampling_attempts = _direct_sampling_attempts_for(active_device_index)
             for attempt_index, direct_sampling_mode in enumerate(direct_sampling_attempts, start=1):
                 rtl_process = None
                 stop_event = None
@@ -818,15 +833,15 @@ def stop_morse() -> Response:
             control_queue.put_nowait({"cmd": "shutdown"})
         _mark("control_queue shutdown signal sent")
 
-    if rtl_proc is not None:
-        _close_pipe(getattr(rtl_proc, "stdout", None))
-        _close_pipe(getattr(rtl_proc, "stderr", None))
-        _mark("rtl_fm pipes closed")
-
+    # Terminate before closing the pipes: close() blocks while a reader
+    # thread is mid-read on a silent pipe, and only process exit ends it.
     if rtl_proc is not None:
         safe_terminate(rtl_proc, timeout=0.6)
         unregister_process(rtl_proc)
         _mark("rtl_fm process terminated")
+        _close_pipe(getattr(rtl_proc, "stdout", None))
+        _close_pipe(getattr(rtl_proc, "stderr", None))
+        _mark("rtl_fm pipes closed")
 
     decoder_joined = _join_thread(decoder_thread, timeout_s=0.45)
     stderr_joined = _join_thread(stderr_thread, timeout_s=0.45)
@@ -1017,16 +1032,12 @@ def morse_status() -> Response:
 
 @morse_bp.route("/morse/stream")
 def morse_stream() -> Response:
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("morse", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.morse_queue,
             channel_key="morse",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

@@ -7,7 +7,9 @@ decoding, and integration with the SSTVDecoder orchestrator.
 from __future__ import annotations
 
 import math
+import sys
 import tempfile
+import time
 import wave
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -73,8 +75,11 @@ def generate_vis_header(vis_code: int, sample_rate: int = SAMPLE_RATE) -> np.nda
     """Generate a synthetic VIS header for a given code.
 
     Structure: leader1 (300ms) + break (10ms) + leader2 (300ms)
-             + start_bit (30ms) + 8 data bits (30ms each)
+             + start_bit (30ms) + 7 data bits (30ms each, LSB first)
              + parity bit (30ms) + stop_bit (30ms)
+
+    This matches what real SSTV encoders (MMSSTV, QSSTV, phone apps)
+    transmit: the VIS code is 7 bits, the eighth slot is the parity bit.
     """
     parts = []
 
@@ -90,9 +95,9 @@ def generate_vis_header(vis_code: int, sample_rate: int = SAMPLE_RATE) -> np.nda
     # Start bit (1200 Hz, 30ms)
     parts.append(generate_tone(FREQ_SYNC, 0.030, sample_rate))
 
-    # 8 data bits (LSB first)
+    # 7 data bits (LSB first)
     ones_count = 0
-    for i in range(8):
+    for i in range(7):
         bit = (vis_code >> i) & 1
         if bit:
             ones_count += 1
@@ -490,7 +495,7 @@ class TestVISDetector:
         parts.append(generate_tone(FREQ_SYNC, 0.030))  # start bit
 
         # Transmit corrupted data bits
-        for i in range(8):
+        for i in range(7):
             bit = (corrupted_code >> i) & 1
             if bit:
                 parts.append(generate_tone(FREQ_VIS_BIT_1, 0.030))
@@ -508,6 +513,89 @@ class TestVISDetector:
         assert result is not None
         assert result[0] == 44
         assert result[1] == "Martin1"
+
+    @pytest.mark.parametrize("offset", [-200, -100, -50, 50, 100, 200])
+    def test_detects_mistuned_ssb_header(self, offset):
+        """On SSB every tone is shifted by the tuning error; the leader measures it."""
+        detector = VISDetector()
+        audio = generate_shifted_vis(44, offset, lead_samples=4800 + 137)
+        result = feed_in_chunks(detector, audio)
+        assert result == (44, "Martin1")
+        assert detector.freq_offset == pytest.approx(offset, abs=5)
+
+    @pytest.mark.parametrize("offset", [0, 100, 200])
+    def test_preamble_tone_before_leader(self, offset):
+        """A 1500 Hz preamble (shifted, it can look like a mistuned leader) must not
+        stop the real leader being found."""
+        detector = VISDetector()
+        audio = generate_shifted_vis(60, offset, preamble_s=0.5)
+        assert feed_in_chunks(detector, audio) == (60, "Scottie1")
+
+    def test_noise_gives_no_offset_lock(self):
+        rng = np.random.default_rng(3)
+        detector = VISDetector()
+        assert feed_in_chunks(detector, rng.normal(scale=0.3, size=SAMPLE_RATE * 5)) is None
+        assert detector.freq_offset == 0.0
+
+
+def generate_shifted_vis(vis_code: int, offset: float, lead_samples: int = 4800, preamble_s: float = 0.0) -> np.ndarray:
+    """VIS header with every tone shifted by `offset` Hz, generated with continuous
+    phase like a real transmitter heard through a mistuned SSB receiver."""
+    bits = [(vis_code >> i) & 1 for i in range(8)]
+    seq = [(FREQ_BLACK, preamble_s)] if preamble_s else []
+    seq += [(FREQ_LEADER, 0.300), (FREQ_SYNC, 0.010), (FREQ_LEADER, 0.300), (FREQ_SYNC, 0.030)]
+    seq += [(FREQ_VIS_BIT_1 if b else FREQ_VIS_BIT_0, 0.030) for b in bits]
+    seq += [(FREQ_VIS_BIT_1 if sum(bits) % 2 else FREQ_VIS_BIT_0, 0.030), (FREQ_SYNC, 0.030), (FREQ_BLACK, 0.2)]
+    freqs = np.concatenate([np.full(int(d * SAMPLE_RATE), f + offset, dtype=np.float64) for f, d in seq])
+    tones = 0.5 * np.sin(np.cumsum(2 * np.pi * freqs / SAMPLE_RATE))
+    return np.concatenate([np.zeros(lead_samples), tones])
+
+
+def robot36_audio(y_for_line, offset: float = 0.0, burst_line: int | None = None) -> np.ndarray:
+    """Robot36 scanlines (neutral chroma) with continuous phase and exact line timing.
+
+    `burst_line` puts a loud 9 ms 1200 Hz burst 15 ms into that line's
+    luminance, where a wide sync search would mistake it for the sync pulse.
+    """
+    segments: list[np.ndarray] = []
+    elapsed = 0.0
+
+    def add(freqs_hz: np.ndarray | float, seconds: float, amplitude: float = 0.5) -> None:
+        nonlocal elapsed
+        n = int(round((elapsed + seconds) * SAMPLE_RATE)) - int(round(elapsed * SAMPLE_RATE))
+        elapsed += seconds
+        f = (
+            np.full(n, float(freqs_hz))
+            if np.isscalar(freqs_hz)
+            else np.asarray(freqs_hz)[np.arange(n) * len(freqs_hz) // n]
+        )
+        segments.append(np.stack([f + offset, np.full(n, amplitude)]))
+
+    for line in range(ROBOT_36.height):
+        y_freqs = FREQ_PIXEL_LOW + np.asarray(y_for_line(line)) / 255.0 * (FREQ_PIXEL_HIGH - FREQ_PIXEL_LOW)
+        add(FREQ_SYNC, 0.009)
+        add(FREQ_BLACK, 0.003)
+        if line == burst_line:
+            add(y_freqs[:36], 0.003)
+            add(FREQ_SYNC, 0.009, amplitude=1.0)
+            add(y_freqs[144:], 0.076)
+        else:
+            add(y_freqs, 0.088)
+        add(FREQ_BLACK, 0.006)
+        add(1900.0, 0.044)  # neutral chroma
+    add(FREQ_BLACK, 0.2)  # tail, so the last line is complete
+    freqs, amps = np.concatenate(segments, axis=1)
+    return amps * np.sin(np.cumsum(2 * np.pi * freqs / SAMPLE_RATE))
+
+
+def feed_in_chunks(detector: VISDetector, audio: np.ndarray):
+    """Feed 100 ms chunks, as the live decoder does."""
+    chunk = SAMPLE_RATE // 10
+    for i in range(0, len(audio), chunk):
+        result = detector.feed(audio[i : i + chunk])
+        if result is not None:
+            return result
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -685,10 +773,44 @@ class TestImageDecoder:
 
             decoder.feed(line_audio)
 
+        # A real stream keeps flowing after the image (rtl_fm never stops);
+        # sync-end detection may hold the final line until a few trailing
+        # samples arrive.
+        decoder.feed(generate_tone(FREQ_BLACK, 0.050))
+
         assert decoder.is_complete
         img = decoder.get_image()
         assert img is not None
         assert img.size == (320, 240)
+
+    @pytest.mark.parametrize("freq_offset, expected_grey", [(100.0, 128), (0.0, 160)])
+    def test_pixels_corrected_for_tuning_offset(self, freq_offset, expected_grey):
+        """Mid-grey (1900 Hz) received 100 Hz high reads as grey only when the offset is removed."""
+        pytest.importorskip("PIL")
+        from utils.sstv.image_decoder import SSTVImageDecoder
+
+        decoder = SSTVImageDecoder(ROBOT_36, freq_offset=freq_offset)
+        decoder.feed(robot36_audio(lambda line: np.full(320, 128.0), offset=100.0))
+        assert decoder.is_complete
+        grey = np.asarray(decoder.get_image().convert("L"), dtype=np.float64)
+        assert grey[10:-10, 20:-20].mean() == pytest.approx(expected_grey, abs=8)
+
+    def test_noise_burst_does_not_shift_following_lines(self):
+        """A loud sync-like burst inside one line must not drag every later line sideways."""
+        pytest.importorskip("PIL")
+        from utils.sstv.image_decoder import SSTVImageDecoder
+
+        # Black bar on the left, white elsewhere
+        pattern = np.where(np.arange(320) < 40, 0.0, 255.0)
+        decoder = SSTVImageDecoder(ROBOT_36)
+        decoder.feed(robot36_audio(lambda line: pattern, burst_line=100))
+        assert decoder.is_complete
+        grey = np.asarray(decoder.get_image().convert("L"), dtype=np.float64)
+
+        def bar_edge(row):
+            return int(np.argmax(grey[row] > 128))
+
+        assert abs(bar_edge(230) - bar_edge(20)) <= 3
 
     def test_slant_correction_wraps_rows_without_blank_wedge(self):
         """Slant correction should rotate rows, not introduce black fill."""
@@ -752,6 +874,104 @@ class TestSSTVDecoder:
         decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
         assert decoder.doppler_enabled is False
         assert decoder.last_doppler_info is None
+
+    def test_start_passes_modulation_gain_and_ppm_to_rtl_fm(self):
+        """rtl_fm should get the chosen modulation, gain and PPM correction."""
+        decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
+        with (
+            patch("utils.sstv.sstv_decoder.subprocess.Popen") as mock_popen,
+            patch.object(decoder, "_decode_audio_stream"),
+        ):
+            assert decoder.start(frequency=145.8, modulation="usb", gain=38.6, ppm=-12)
+            decoder._running = False
+
+        cmd = mock_popen.call_args.args[0]
+        assert cmd[cmd.index("-f") + 1] == "145800000"
+        assert cmd[cmd.index("-M") + 1] == "usb"
+        assert cmd[cmd.index("-g") + 1] == "38.6"
+        assert cmd[cmd.index("-p") + 1] == "-12"
+        assert cmd[-1] == "-"
+        assert decoder.modulation == "usb"
+
+    def test_rtl_fm_defaults_to_auto_gain_and_no_ppm(self):
+        """Without gain/PPM, rtl_fm should run on auto gain with no correction."""
+        decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
+        cmd = decoder._build_rtl_cmd(145_800_000)
+        assert "-g" not in cmd
+        assert "-p" not in cmd
+
+    def test_doppler_retune_keeps_decoder_running(self):
+        """A Doppler retune restarts rtl_fm; the decode pipeline must survive it."""
+        fake_rtl_fm = [
+            sys.executable,
+            "-c",
+            "import sys, time\nwhile True:\n    sys.stdout.buffer.write(bytes(9600)); sys.stdout.flush(); time.sleep(0.05)",
+        ]
+        decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
+        events = []
+        decoder.set_callback(events.append)
+        with patch.object(decoder, "_build_rtl_cmd", return_value=fake_rtl_fm):
+            assert decoder.start(frequency=145.8)
+            try:
+                time.sleep(0.3)
+                old_proc = decoder._rtl_process
+                decoder._retune_rtl_fm(145_801_000)
+                time.sleep(0.5)
+
+                assert decoder.is_running
+                assert decoder._rtl_process is not old_proc
+                assert decoder._rtl_process.poll() is None
+                assert decoder._decode_thread.is_alive()
+                assert decoder._current_tuned_freq_hz == 145_801_000
+                assert not [e for e in events if e.get("status") == "error"]
+            finally:
+                decoder.stop()
+
+    def test_doppler_update_carries_doppler_data(self):
+        """Doppler updates carry their own data so the UI can show them alongside 'Listening...'."""
+        from datetime import datetime, timezone
+
+        decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
+        decoder._frequency = 145.8
+        decoder._current_tuned_freq_hz = 145_800_100
+        decoder._running = True
+        decoder._doppler_enabled = True
+        info = DopplerInfo(
+            frequency_hz=145_800_120.0,
+            shift_hz=120.0,
+            range_rate_km_s=-0.247,
+            elevation=23.4,
+            azimuth=180.0,
+            timestamp=datetime(2024, 1, 1, tzinfo=timezone.utc),
+        )
+        events = []
+
+        def capture(event):
+            events.append(event)
+            decoder._running = False
+
+        decoder.set_callback(capture)
+        with (
+            patch.object(decoder, "DOPPLER_UPDATE_INTERVAL", 0),
+            patch.object(decoder._doppler_tracker, "calculate", return_value=info),
+        ):
+            decoder._doppler_tracking_loop()
+
+        assert events[0]["doppler"]["shift_hz"] == 120.0
+        assert events[0]["doppler"]["elevation"] == 23.4
+
+    def test_failed_retune_stops_decoder_and_reports_error(self):
+        """If rtl_fm cannot be restarted, the decoder stops and says why."""
+        decoder = SSTVDecoder(output_dir=tempfile.mkdtemp())
+        events = []
+        decoder.set_callback(events.append)
+        decoder._running = True
+        with patch("utils.sstv.sstv_decoder.subprocess.Popen", side_effect=OSError("usb_claim_interface error -6")):
+            decoder._retune_rtl_fm(145_801_000)
+
+        assert decoder.is_running is False
+        errors = [e for e in events if e.get("status") == "error"]
+        assert errors and "usb_claim_interface" in errors[0]["message"]
 
     def test_stop_when_not_running(self):
         """Stop should be safe to call when not running."""
@@ -957,3 +1177,174 @@ class TestIntegration:
 
         decoder.stop()
         assert decoder.is_running is False
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: spec-timed transmissions through the full pipeline
+# ---------------------------------------------------------------------------
+
+
+def _encode_transmission(mode, img: np.ndarray) -> np.ndarray:
+    """Encode a full SSTV transmission (leader + VIS + image) per the spec.
+
+    Continuous-phase FM synthesis; timings come straight from the mode
+    spec, the way MMSSTV/QSSTV and phone apps transmit. This is the
+    ground truth the decoder must handle, independent of its internals.
+    """
+    from utils.sstv.modes import ColorModel, SyncPosition
+
+    segments: list[tuple[float, float]] = [(1900.0, 0.5)]  # pre-tone
+
+    # VIS: leader, break, leader, start + 7 data bits + parity + stop
+    segments += [(1900.0, 0.3), (1200.0, 0.01), (1900.0, 0.3), (1200.0, 0.03)]
+    parity = 0
+    for b in range(7):
+        bit = (mode.vis_code >> b) & 1
+        parity ^= bit
+        segments.append((1100.0 if bit else 1300.0, 0.03))
+    segments.append((1100.0 if parity else 1300.0, 0.03))
+    segments.append((1200.0, 0.03))
+
+    def pixels(values: np.ndarray, duration_s: float) -> None:
+        per = duration_s / len(values)
+        for v in values:
+            segments.append((1500.0 + (float(v) / 255.0) * 800.0, per))
+
+    ms = 1e-3
+    for line in range(img.shape[0]):
+        r, g, b = img[line, :, 0], img[line, :, 1], img[line, :, 2]
+        if mode.color_model == ColorModel.RGB and mode.sync_position == SyncPosition.FRONT:
+            # Martin: sync, porch, G, porch, B, porch, R, porch
+            segments.append((1200.0, mode.sync_duration_ms * ms))
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(g, mode.channels[0].duration_ms * ms)
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(b, mode.channels[1].duration_ms * ms)
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(r, mode.channels[2].duration_ms * ms)
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+        elif mode.color_model == ColorModel.RGB:
+            # Scottie: one starting sync, then sep, G, sep, B, sync, porch, R
+            if line == 0:
+                segments.append((1200.0, mode.sync_duration_ms * ms))
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(g, mode.channels[0].duration_ms * ms)
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(b, mode.channels[1].duration_ms * ms)
+            segments.append((1200.0, mode.sync_duration_ms * ms))
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(r, mode.channels[2].duration_ms * ms)
+        else:
+            # Robot36: sync, porch, Y, separator+porch, Cr/Cb alternating
+            rgbf = img[line].astype(np.float64)
+            y = 0.299 * rgbf[:, 0] + 0.587 * rgbf[:, 1] + 0.114 * rgbf[:, 2]
+            cr = (rgbf[:, 0] - y) * 0.713 + 128
+            cb = (rgbf[:, 2] - y) * 0.564 + 128
+            segments.append((1200.0, mode.sync_duration_ms * ms))
+            segments.append((1500.0, mode.sync_porch_ms * ms))
+            pixels(np.clip(y, 0, 255), mode.channels[0].duration_ms * ms)
+            segments.append((1500.0 if line % 2 == 0 else 2300.0, 0.0045))
+            segments.append((1900.0, 0.0015))
+            chroma = cr if line % 2 == 0 else cb
+            pixels(np.clip(chroma, 0, 255), mode.channels[1].duration_ms * ms)
+
+    segments.append((1500.0, 0.2))
+
+    t_end = 0.0
+    events = []
+    for f, d in segments:
+        events.append((t_end, t_end + d, f))
+        t_end += d
+    n = int(t_end * SAMPLE_RATE)
+    freq = np.zeros(n)
+    for start, end, f in events:
+        freq[int(start * SAMPLE_RATE) : int(end * SAMPLE_RATE)] = f
+    for i in range(1, n):
+        if freq[i] == 0:
+            freq[i] = freq[i - 1]
+    phase = np.cumsum(2 * np.pi * freq / SAMPLE_RATE)
+    return 0.8 * np.sin(phase)
+
+
+def _decode_transmission(audio: np.ndarray):
+    """Run audio through the pipeline the way the live decoder does."""
+    from utils.sstv.dsp import StreamingBandpass
+    from utils.sstv.image_decoder import SSTVImageDecoder
+    from utils.sstv.modes import get_mode
+
+    bandpass = StreamingBandpass(sample_rate=SAMPLE_RATE)
+    vis = VISDetector(sample_rate=SAMPLE_RATE)
+    decoder = None
+    chunk = SAMPLE_RATE // 10
+    for off in range(0, len(audio), chunk):
+        samples = bandpass.process(audio[off : off + chunk])
+        if decoder is None:
+            result = vis.feed(samples)
+            if result is not None:
+                decoder = SSTVImageDecoder(get_mode(result[0]), sample_rate=SAMPLE_RATE, freq_offset=vis.freq_offset)
+                decoder.feed(vis.remaining_buffer.copy())
+        else:
+            decoder.feed(samples)
+    if decoder is not None:
+        decoder.feed(bandpass.flush())
+    return decoder
+
+
+class TestEndToEnd:
+    """Decode spec-timed transmissions, as real SSTV software sends them."""
+
+    def test_vis_handover_is_prompt(self):
+        """The image decoder must receive its audio from the end of the VIS
+        stop bit, not one bit later: a late handover skews every line."""
+        header = generate_vis_header(44)
+        marker = generate_tone(FREQ_WHITE, 0.5)
+        audio = np.concatenate([generate_tone(FREQ_LEADER, 0.1), header, marker])
+
+        detector = VISDetector()
+        result = detector.feed(audio)
+        assert result is not None and result[0] == 44
+        handover = len(audio) - len(detector.remaining_buffer)
+        image_start = len(audio) - len(marker)
+        error_ms = (handover - image_start) / SAMPLE_RATE * 1000.0
+        assert abs(error_ms) <= 12.0, f"handover off by {error_ms:.1f} ms"
+
+    @pytest.mark.parametrize("mode_name", ["Martin2", "Scottie2"])
+    def test_stripe_lands_where_transmitted(self, mode_name):
+        """A vertical stripe must come out at its transmitted position in
+        every channel; constant offsets mean sync/VIS timing is broken."""
+        pytest.importorskip("PIL")
+        from utils.sstv.modes import get_mode_by_name
+
+        mode = get_mode_by_name(mode_name)
+        img = np.zeros((40, mode.width, 3), dtype=np.uint8)  # 40 lines is enough
+        img[:, 100:110] = 255
+        decoder = _decode_transmission(_encode_transmission(mode, img))
+        assert decoder is not None, "VIS not detected"
+        assert decoder.current_line >= 30
+        arr = np.asarray(decoder.get_image()).astype(np.float64)
+        rows = arr[5:25]
+        for channel in range(3):
+            profile = rows[:, :, channel].mean(axis=0)
+            bright = np.where(profile > 128)[0]
+            assert len(bright) > 0, f"channel {channel}: stripe missing"
+            center = (bright.min() + bright.max()) / 2.0
+            assert abs(center - 104.5) <= 6, f"channel {channel}: stripe at {center}"
+
+    def test_wideband_noise_does_not_bleach_image(self):
+        """rtl_fm SSB output carries noise across its whole bandwidth. The
+        instantaneous-frequency demodulator must not read that noise as
+        'very high frequency' and clip a grey image toward white."""
+        pytest.importorskip("PIL")
+        from utils.sstv.modes import get_mode_by_name
+
+        mode = get_mode_by_name("Robot36")
+        img = np.full((40, mode.width, 3), 128, dtype=np.uint8)
+        audio = _encode_transmission(mode, img)
+        rng = np.random.default_rng(7)
+        audio = audio + rng.normal(0.0, 0.25, len(audio))
+        decoder = _decode_transmission(audio)
+        assert decoder is not None, "VIS not detected"
+        assert decoder.current_line >= 30
+        grey = np.asarray(decoder.get_image().convert("L"), dtype=np.float64)
+        body = grey[5:25, 20:-20]
+        assert 100 <= body.mean() <= 156, f"grey image decoded at {body.mean():.0f}"

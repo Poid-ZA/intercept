@@ -1,6 +1,12 @@
 <!DOCTYPE html>
 <html lang="en" class="{% if offline_settings.tile_provider in ['cartodb_dark', 'cartodb_dark_cyan'] %}map-cyber-enabled{% endif %}">
 <head>
+    <script src="{{ url_for('static', filename='js/core/utils.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/track-icons.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/visible-interval.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/copy-id.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/device-notes.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/core/live-empty-state.js') }}"></script>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VESSEL RADAR // INTERCEPT - See the Invisible</title>
@@ -11,10 +17,11 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='vendor/leaflet/leaflet.css') }}">
     <!-- Core CSS -->
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/variables.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard-shell.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/ais_dashboard.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/responsive.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/layout.css') }}">
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}?v={{ version }}&r=maptheme17">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/settings.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/help-modal.css') }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/core/map-utils.css') }}">
     <!-- Deferred scripts -->
@@ -156,6 +163,9 @@
                 <div class="control-group-items">
                     <label title="Show vessel trails"><input type="checkbox" id="showTrails" onchange="toggleTrails()"> Trails</label>
                     <label title="Show range rings"><input type="checkbox" id="showRangeRings" checked onchange="drawRangeRings()"> Rings</label>
+                    <label title="Name and speed beside each vessel, when zoomed in"><input type="checkbox" id="showLabels" checked onchange="setMapLabels(this.checked)"> Labels</label>
+                    <label title="Outline of the furthest contact heard in each direction"><input type="checkbox" id="showReach" checked onchange="receptionOutline && receptionOutline.setVisible(this.checked)"> Reach</label>
+                    <button type="button" class="reach-reset" title="Forget the reception outline for this location" onclick="receptionOutline && receptionOutline.reset()">&#8634;</button>
                     <select id="rangeSelect" onchange="updateRange()" title="Range rings distance">
                         <option value="10">10nm</option>
                         <option value="25">25nm</option>
@@ -205,6 +215,32 @@
 
         // State
         let vesselMap = null;
+        let receptionOutline = null;  // components/reception-outline.js
+        let headingLines = null;       // components/track-icons.js
+        let mapLabels = null;          // components/track-icons.js
+        let hullShapes = null;         // components/track-icons.js
+        const LABELS_KEY = 'intercept.map.labels';
+
+        // AIS navigation status 1 = at anchor, 5 = moored
+        function isMoored(vessel) {
+            return vessel.nav_status === 1 || vessel.nav_status === 5 || vessel.nav_status === '1' || vessel.nav_status === '5';
+        }
+
+        // "EVER GIVEN 12.5 kn", or the MMSI when the name is not yet known
+        function vesselLabel(vessel) {
+            const name = (vessel.name || '').trim() || vessel.mmsi;
+            return vessel.speed >= 0.5 && !isMoored(vessel) ? `${name} ${vessel.speed} kn` : name;
+        }
+
+        function setMapLabels(on) {
+            try { localStorage.setItem(LABELS_KEY, on ? '1' : '0'); } catch (e) { /* this visit only */ }
+            if (mapLabels) mapLabels.setEnabled(on);
+        }
+
+        function markHull(mmsi, drawn) {
+            const el = markers[mmsi] && markers[mmsi].getElement && markers[mmsi].getElement();
+            if (el) el.classList.toggle('ti-under-hull', drawn);
+        }
         let aisMapOverlays = null;
         let vessels = {};
         let markers = {};
@@ -344,22 +380,15 @@
         }
 
         // Create SVG vessel marker icon
-        function createVesselMarkerIcon(rotation, vesselType, isSelected = false) {
-            const path = VESSEL_ICONS[vesselType] || VESSEL_ICONS.default;
-            const color = VESSEL_COLORS[vesselType] || VESSEL_COLORS.default;
-            const size = 24;
-            const glowColor = isSelected ? 'rgba(255,255,255,0.8)' : color;
-            const glowSize = isSelected ? '8px' : '4px';
-            const trackingRing = isSelected ?
-                '<div class="tracking-ring"></div><div class="tracking-ring-inner"></div>' : '';
-
-            return L.divIcon({
-                className: 'vessel-marker' + (isSelected ? ' selected' : ''),
-                html: `${trackingRing}<svg width="${size}" height="${size}" viewBox="0 0 24 24" style="transform: rotate(${rotation}deg); filter: drop-shadow(0 0 ${glowSize} ${glowColor});">
-                    <path fill="${color}" d="${path}"/>
-                </svg>`,
-                iconSize: [size, size],
-                iconAnchor: [size/2, size/2]
+        // Vessel markers with a dark outline (components/track-icons.js)
+        function createVesselMarkerIcon(rotation, vesselType, isSelected = false, vessel = null) {
+            return TrackIcons.vessel({
+                path: VESSEL_ICONS[vesselType] || VESSEL_ICONS.default,
+                color: VESSEL_COLORS[vesselType] || VESSEL_COLORS.default,
+                heading: rotation,
+                selected: isSelected,
+                moored: vessel ? isMoored(vessel) : false,
+                label: vessel ? vesselLabel(vessel) : '',
             });
         }
 
@@ -419,6 +448,32 @@
                 scaleBar: true,
             });
 
+            // Six minutes ahead (a tenth of an hour), as marine radar shows it: a minute is too short at sea
+            headingLines = TrackIcons.vectors(vesselMap, { seconds: 360, minKnots: 0.5 });
+            let labelsOn = true;
+            try { labelsOn = localStorage.getItem(LABELS_KEY) !== '0'; } catch (e) { /* default on */ }
+            const labelsBox = document.getElementById('showLabels');
+            if (labelsBox) labelsBox.checked = labelsOn;
+            mapLabels = TrackIcons.labels(vesselMap, { minZoom: 11, enabled: labelsOn });
+            hullShapes = TrackIcons.hulls(vesselMap, { onClick: (mmsi) => selectVessel(mmsi) });
+            hullShapes.onZoom = markHull;
+            // Fade vessels not heard for 3 minutes (at anchor they report that rarely)
+            setInterval(() => {
+                const now = Date.now();
+                Object.keys(markers).forEach((mmsi) => {
+                    const el = markers[mmsi].getElement && markers[mmsi].getElement();
+                    const seen = vessels[mmsi] && vessels[mmsi].last_seen ? vessels[mmsi].last_seen * 1000 : now;
+                    if (el) el.classList.toggle('ti-stale', now - seen > 180000);
+                });
+            }, 10000);
+
+            if (window.ReceptionOutline) {
+                receptionOutline = ReceptionOutline.create(vesselMap, {
+                    key: 'ais', observer: () => observerLocation, color: '#3b82f6',
+                    visible: document.getElementById('showReach')?.checked !== false,
+                });
+            }
+
             // Add observer marker
             observerMarker = L.circleMarker([observerLocation.lat, observerLocation.lon], {
                 radius: 8,
@@ -433,7 +488,7 @@
             drawRangeRings();
             loadDevices();
             updateClock();
-            setInterval(updateClock, 1000);
+            VisibleInterval.set(updateClock, 1000);
             setInterval(cleanupStaleVessels, 10000);
         }
 
@@ -451,6 +506,7 @@
                             const opt = document.createElement('option');
                             opt.value = d.index;
                             opt.textContent = `SDR ${d.index}: ${d.name}`;
+                            opt.dataset.sdrType = d.sdr_type || 'rtlsdr';
                             aisSelect.appendChild(opt);
                         });
                     }
@@ -465,6 +521,7 @@
                             const opt = document.createElement('option');
                             opt.value = d.index;
                             opt.textContent = `SDR ${d.index}: ${d.name}`;
+                            opt.dataset.sdrType = d.sdr_type || 'rtlsdr';
                             dscSelect.appendChild(opt);
                         });
                         // Default to second device if available
@@ -509,10 +566,12 @@
                 const circle = L.circle([observerLocation.lat, observerLocation.lon], {
                     radius: nm * nmToMeters,
                     fill: false,
-                    color: '#4a9eff',
-                    opacity: 0.3,
-                    weight: 1,
-                    dashArray: '4 4'
+                    // Strong enough to read over satellite imagery (it was 1 px at 30%)
+                    color: '#7cc4ff',
+                    opacity: 0.75,
+                    weight: 1.5,
+                    dashArray: '6 5',
+                    interactive: false
                 });
                 rings.push(circle);
             });
@@ -546,9 +605,18 @@
             }
         }
 
+        // SDR type of the currently selected device (so non-RTL-SDR hardware
+        // like HackRF is claimed with the right probe, not the RTL-SDR one).
+        function selectedSdrType(selectId) {
+            const sel = document.getElementById(selectId);
+            const opt = sel && sel.options[sel.selectedIndex];
+            return (opt && opt.dataset.sdrType) || 'rtlsdr';
+        }
+
         async function startTracking() {
             const device = document.getElementById('aisDeviceSelect').value;
             const gain = document.getElementById('aisGain').value;
+            const sdr_type = selectedSdrType('aisDeviceSelect');
 
             // Check if using agent mode
             const useAgent = typeof aisCurrentAgent !== 'undefined' && aisCurrentAgent !== 'local';
@@ -562,7 +630,7 @@
                 fetch(`/controller/agents/${aisCurrentAgent}/ais/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ device, gain, bias_t: getBiasTEnabled() })
+                    body: JSON.stringify({ device, gain, sdr_type, bias_t: getBiasTEnabled() })
                 })
                 .then(r => r.json())
                 .then(result => {
@@ -587,7 +655,7 @@
             fetch('/ais/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ device, gain, bias_t: getBiasTEnabled() })
+                body: JSON.stringify({ device, gain, sdr_type, bias_t: getBiasTEnabled() })
             })
             .then(r => r.json())
             .then(data => {
@@ -755,6 +823,7 @@
             if (data.lat !== undefined && data.lat !== null && data.lon !== undefined && data.lon !== null) {
                 const dist = calculateDistance(observerLocation.lat, observerLocation.lon, data.lat, data.lon);
                 if (dist > stats.maxRange) stats.maxRange = dist;
+                if (receptionOutline) receptionOutline.add(data.lat, data.lon);
                 if (dist < stats.closestDistance) stats.closestDistance = dist;
 
                 // Update trail
@@ -792,10 +861,17 @@
             const mmsi = vessel.mmsi;
             if (!vessel.lat || !vessel.lon) return;
 
-            const heading = vessel.heading || vessel.course || 0;
+            const heading = vessel.heading ?? vessel.course ?? 0;
             const vesselType = getVesselIconType(vessel.ship_type);
             const isSelected = mmsi === selectedMmsi;
-            const divIcon = createVesselMarkerIcon(heading, vesselType, isSelected);
+            const divIcon = createVesselMarkerIcon(heading, vesselType, isSelected, vessel);
+            const color = VESSEL_COLORS[vesselType] || VESSEL_COLORS.default;
+
+            // Where it will be in six minutes, on its course and speed over ground
+            if (headingLines) {
+                if (isMoored(vessel)) headingLines.remove(mmsi);
+                else headingLines.update(mmsi, vessel.lat, vessel.lon, vessel.course, vessel.speed, color);
+            }
 
             if (markers[mmsi]) {
                 markers[mmsi].setLatLng([vessel.lat, vessel.lon]);
@@ -808,6 +884,13 @@
 
             const name = vessel.name || 'Unknown';
             markers[mmsi].bindTooltip(`${name}<br>MMSI: ${mmsi}`, { direction: 'top' });
+
+            // To scale when zoomed in far enough to see the hull
+            if (hullShapes) {
+                const hullHeading = vessel.heading ?? vessel.course;
+                const drawn = hullShapes.update(mmsi, vessel.lat, vessel.lon, hullHeading, vessel, color);
+                markHull(mmsi, drawn);
+            }
         }
 
         function selectVessel(mmsi) {
@@ -818,10 +901,12 @@
             [prevSelected, mmsi].forEach(m => {
                 if (m && vessels[m] && markers[m]) {
                     const vessel = vessels[m];
-                    const heading = vessel.heading || vessel.course || 0;
+                    const heading = vessel.heading ?? vessel.course ?? 0;
                     const vesselType = getVesselIconType(vessel.ship_type);
                     const isSelected = m === mmsi;
-                    markers[m].setIcon(createVesselMarkerIcon(heading, vesselType, isSelected));
+                    markers[m].setIcon(createVesselMarkerIcon(heading, vesselType, isSelected, vessel));
+                    if (hullShapes) markHull(m, !!hullShapes.update(m, vessel.lat, vessel.lon, vessel.heading ?? vessel.course, vessel,
+                        VESSEL_COLORS[vesselType] || VESSEL_COLORS.default));
                 }
             });
 
@@ -846,7 +931,7 @@
                     <div class="vessel-icon">${iconSvg}</div>
                     <div>
                         <div class="vessel-name">${vessel.name || 'Unknown Vessel'}</div>
-                        <div class="vessel-mmsi">MMSI: ${vessel.mmsi}</div>
+                        <div class="vessel-mmsi">MMSI: ${CopyId.html(vessel.mmsi)}${DeviceNotes.html(vessel.mmsi, 'ais')}</div>
                     </div>
                 </div>
                 <div class="vessel-details">
@@ -927,7 +1012,7 @@
                         <div class="vessel-item-icon">${iconSvg}</div>
                         <div class="vessel-item-info">
                             <div class="vessel-item-name">${v.name || 'Unknown'}${agentBadge}</div>
-                            <div class="vessel-item-type">${category} | ${v.mmsi}</div>
+                            <div class="vessel-item-type">${category} | ${CopyId.html(v.mmsi)}${DeviceNotes.html(v.mmsi, 'ais')}</div>
                         </div>
                         <div class="vessel-item-speed">${v.speed ? v.speed + ' kt' : '-'}</div>
                     </div>
@@ -955,6 +1040,8 @@
                         vesselMap.removeLayer(markers[mmsi]);
                         delete markers[mmsi];
                     }
+                    if (headingLines) headingLines.remove(mmsi);
+                    if (hullShapes) hullShapes.remove(mmsi);
                     if (trailLines[mmsi]) {
                         vesselMap.removeLayer(trailLines[mmsi]);
                         delete trailLines[mmsi];
@@ -1093,22 +1180,22 @@
             if (!stats.sessionStart) {
                 stats.sessionStart = Date.now();
             }
-            if (sessionTimerInterval) clearInterval(sessionTimerInterval);
-            sessionTimerInterval = setInterval(updateSessionTimer, 1000);
+            if (sessionTimerInterval) VisibleInterval.clear(sessionTimerInterval);
+            sessionTimerInterval = VisibleInterval.set(updateSessionTimer, 1000);
 
             // Start message rate tracking
-            if (messageRateInterval) clearInterval(messageRateInterval);
+            if (messageRateInterval) VisibleInterval.clear(messageRateInterval);
             lastMessageCount = stats.messagesReceived;
-            messageRateInterval = setInterval(updateMessageRate, 1000);
+            messageRateInterval = VisibleInterval.set(updateMessageRate, 1000);
         }
 
         function stopSessionTimer() {
             if (sessionTimerInterval) {
-                clearInterval(sessionTimerInterval);
+                VisibleInterval.clear(sessionTimerInterval);
                 sessionTimerInterval = null;
             }
             if (messageRateInterval) {
-                clearInterval(messageRateInterval);
+                VisibleInterval.clear(messageRateInterval);
                 messageRateInterval = null;
             }
         }
@@ -1174,6 +1261,7 @@
         function startDscTracking() {
             const device = document.getElementById('dscDeviceSelect').value;
             const gain = document.getElementById('dscGain').value;
+            const sdr_type = selectedSdrType('dscDeviceSelect');
 
             // Check if using agent mode
             const isAgentMode = typeof aisCurrentAgent !== 'undefined' && aisCurrentAgent !== 'local';
@@ -1184,7 +1272,7 @@
                 ? getRemoteSDRConfig() : null;
             if (remoteConfig === false) return; // Validation failed
 
-            const requestBody = { device, gain };
+            const requestBody = { device, gain, sdr_type };
 
             // Add rtl_tcp params if using remote SDR
             if (remoteConfig) {
@@ -1374,7 +1462,7 @@
             alertDiv.className = 'dsc-distress-alert';
             alertDiv.innerHTML = `
                 <div class="dsc-alert-header">${data.category}</div>
-                <div class="dsc-alert-mmsi">MMSI: ${data.source_mmsi}</div>
+                <div class="dsc-alert-mmsi">MMSI: ${CopyId.html(data.source_mmsi)}${DeviceNotes.html(data.source_mmsi, 'dsc')}</div>
                 ${data.source_country ? `<div class="dsc-alert-country">${data.source_country}</div>` : ''}
                 ${data.nature_of_distress ? `<div class="dsc-alert-nature">${data.nature_of_distress}</div>` : ''}
                 ${data.latitude ? `<div class="dsc-alert-position">${data.latitude.toFixed(4)}, ${data.longitude.toFixed(4)}</div>` : ''}
@@ -1458,7 +1546,7 @@
                             <span class="dsc-message-category">${msg.category}</span>
                             <span class="dsc-message-time">${formatDscTime(msg.timestamp)}</span>
                         </div>
-                        <div class="dsc-message-mmsi">MMSI: ${msg.source_mmsi}</div>
+                        <div class="dsc-message-mmsi">MMSI: ${CopyId.html(msg.source_mmsi)}${DeviceNotes.html(msg.source_mmsi, 'dsc')}</div>
                         ${msg.source_country ? `<div class="dsc-message-country">${msg.source_country}</div>` : ''}
                         ${msg.nature_of_distress ? `<div class="dsc-message-nature">${msg.nature_of_distress}</div>` : ''}
                         ${msg.latitude ? `<div class="dsc-message-pos">${msg.latitude.toFixed(4)}, ${msg.longitude.toFixed(4)}</div>` : ''}
@@ -1468,13 +1556,8 @@
         }
 
         function formatDscTime(timestamp) {
-            if (!timestamp) return '--:--';
-            try {
-                const d = new Date(timestamp);
-                return d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            } catch (e) {
-                return timestamp.slice(11, 19) || '--:--';
-            }
+            // "3 min ago", kept current by the page's relative clock; exact time on hover
+            return (timestamp && InterceptTime.relTimeHtml(timestamp)) || '--:--';
         }
 
         function updateDscAlertSummary() {
@@ -1584,11 +1667,11 @@
     <!-- Help Modal -->
     {% include 'partials/help-modal.html' %}
 
-    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}?v={{ version }}&r=voicefix2"></script>
+    <script src="{{ url_for('static', filename='js/core/voice-alerts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/keyboard-shortcuts.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/cheat-sheets.js') }}"></script>
     {% include 'partials/nav-utility-modals.html' %}
-    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}?v={{ version }}&r=maptheme17"></script>
+    <script src="{{ url_for('static', filename='js/core/settings-manager.js') }}"></script>
     <script src="{{ url_for('static', filename='js/map-utils.js') }}"></script>
     <script>
         window.addEventListener('DOMContentLoaded', () => {
@@ -1603,6 +1686,9 @@
     <!-- Agent Manager -->
     <script src="{{ url_for('static', filename='js/core/agents.js') }}"></script>
     <script src="{{ url_for('static', filename='js/core/global-nav.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/strip-spark.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/components/reception-outline.js') }}"></script>
+    <script>StripSpark.attach('stripVesselsNow', { title: 'Vessels in view, over the last 15 minutes' });</script>
     <script>
         // AIS-specific agent integration
         let aisCurrentAgent = 'local';
@@ -1683,11 +1769,12 @@
 
                 const device = document.getElementById('aisDeviceSelect').value;
                 const gain = document.getElementById('aisGain').value;
+                const sdr_type = selectedSdrType('aisDeviceSelect');
 
                 fetch(`/controller/agents/${aisCurrentAgent}/ais/start`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ device, gain, bias_t: getBiasTEnabled() })
+                    body: JSON.stringify({ device, gain, sdr_type, bias_t: getBiasTEnabled() })
                 })
                 .then(r => r.json())
                 .then(data => {

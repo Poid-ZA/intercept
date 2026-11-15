@@ -35,12 +35,14 @@ from utils.gps import is_gpsd_running
 from utils.logging import get_logger
 from utils.responses import api_error, api_success
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
     validate_gain,
     validate_latitude,
     validate_longitude,
+    validate_ppm,
 )
 
 logger = get_logger("intercept.radiosonde")
@@ -578,11 +580,13 @@ def start_radiosonde():
             return api_error("Radiosonde tracking already active", 409)
 
     data = request.json or {}
+    data = apply_device_defaults(data)
 
     # Validate inputs
     try:
         gain = float(validate_gain(data.get("gain", "40")))
         device = validate_device_index(data.get("device", "0"))
+        ppm = validate_ppm(data.get("ppm", 0))
     except ValueError as e:
         return api_error(str(e), 400)
 
@@ -599,7 +603,6 @@ def start_radiosonde():
         return api_error(f"Invalid frequency range: {e}", 400)
 
     bias_t = data.get("bias_t", False)
-    ppm = int(data.get("ppm", 0))
 
     # Validate optional location
     latitude = 0.0
@@ -624,6 +627,18 @@ def start_radiosonde():
 
     # Get SDR type
     sdr_type_str = data.get("sdr_type", "rtlsdr")
+
+    # radiosonde_auto_rx's config format only supports RTLSDR, SpyServer or KA9Q
+    # as a local/network source (see autorx/config.py) - it has no SoapySDR/HackRF
+    # backend, so station.cfg always hardcodes sdr_type=RTLSDR below. Fail fast
+    # with a clear message instead of claiming the device, writing the config and
+    # crashing the subprocess with an opaque "No SDRs available!" IOError.
+    if sdr_type_str != "rtlsdr":
+        return api_error(
+            "Radiosonde mode requires an RTL-SDR device. radiosonde_auto_rx does not "
+            "yet support HackRF/SoapySDR devices directly.",
+            400,
+        )
 
     # Kill any existing process
     if app_module.radiosonde_process:
@@ -681,7 +696,7 @@ def start_radiosonde():
                 "Install or repair its Python environment (missing packages such as semver). "
                 f"Checked interpreters: {checked_msg}. "
                 f"Last error: {dep_error[:500]}",
-                500,
+                503,
             )
         cmd = [selected_python, auto_rx_path, "-c", cfg_abs]
     else:

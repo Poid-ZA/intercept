@@ -13,12 +13,20 @@ from datetime import datetime
 from flask import Blueprint, Response, jsonify, request
 
 import app as app_module
-from utils.event_pipeline import process_event
+from utils.dependencies import install_hint
 from utils.logging import sensor_logger as logger
 from utils.process import register_process, unregister_process
 from utils.responses import api_error
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
-from utils.validation import validate_device_index, validate_frequency, validate_gain, validate_ppm
+from utils.validation import (
+    validate_device_index,
+    validate_frequency,
+    validate_gain,
+    validate_ppm,
+    validate_rtl_tcp_host,
+    validate_rtl_tcp_port,
+)
 
 rtlamr_bp = Blueprint("rtlamr", __name__)
 
@@ -100,6 +108,7 @@ def start_rtlamr() -> Response:
             return api_error("RTLAMR already running", 409)
 
         data = request.json or {}
+        data = apply_device_defaults(data)
         sdr_type_str = data.get("sdr_type", "rtlsdr")
 
         if sdr_type_str != "rtlsdr":
@@ -114,17 +123,23 @@ def start_rtlamr() -> Response:
             gain = validate_gain(data.get("gain", "0"))
             ppm = validate_ppm(data.get("ppm", "0"))
             device = validate_device_index(data.get("device", "0"))
+            # Remote SDR: rtlamr speaks rtl_tcp itself, so no local server or claim
+            rtl_tcp_host = data.get("rtl_tcp_host") or None
+            if rtl_tcp_host:
+                rtl_tcp_host = validate_rtl_tcp_host(rtl_tcp_host)
+                rtl_tcp_port = validate_rtl_tcp_port(data.get("rtl_tcp_port", 1234))
         except ValueError as e:
             return api_error(str(e), 400)
 
-        # Check if device is available
-        device_int = int(device)
-        error = app_module.claim_sdr_device(device_int, "rtlamr", sdr_type_str)
-        if error:
-            return api_error(error, 409, error_type="DEVICE_BUSY")
+        if not rtl_tcp_host:
+            # Check if device is available
+            device_int = int(device)
+            error = app_module.claim_sdr_device(device_int, "rtlamr", sdr_type_str)
+            if error:
+                return api_error(error, 409, error_type="DEVICE_BUSY")
 
-        rtlamr_active_device = device_int
-        rtlamr_active_sdr_type = sdr_type_str
+            rtlamr_active_device = device_int
+            rtlamr_active_sdr_type = sdr_type_str
 
         # Clear queue
         while not app_module.rtlamr_queue.empty():
@@ -141,10 +156,10 @@ def start_rtlamr() -> Response:
         rtl_tcp_just_started = False
         rtl_tcp_cmd_str = ""
         with rtl_tcp_lock:
-            if not rtl_tcp_process:
+            if not rtl_tcp_process and not rtl_tcp_host:
                 logger.info("Starting rtl_tcp server...")
                 try:
-                    rtl_tcp_cmd = ["rtl_tcp", "-a", "0.0.0.0"]
+                    rtl_tcp_cmd = ["rtl_tcp", "-a", "127.0.0.1"]
 
                     # Add device index if not 0
                     if device and device != "0":
@@ -154,9 +169,9 @@ def start_rtlamr() -> Response:
                     if gain and gain != "0":
                         rtl_tcp_cmd.extend(["-g", str(gain)])
 
-                    # Add PPM correction if not 0
+                    # Add PPM correction if not 0 (-P; rtl_tcp's -p is the listen port)
                     if ppm and ppm != "0":
-                        rtl_tcp_cmd.extend(["-p", str(ppm)])
+                        rtl_tcp_cmd.extend(["-P", str(ppm)])
 
                     rtl_tcp_process = subprocess.Popen(rtl_tcp_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                     register_process(rtl_tcp_process)
@@ -168,6 +183,8 @@ def start_rtlamr() -> Response:
                     if rtlamr_active_device is not None:
                         app_module.release_sdr_device(rtlamr_active_device, rtlamr_active_sdr_type)
                         rtlamr_active_device = None
+                    if isinstance(e, FileNotFoundError):
+                        return api_error(f"rtl_tcp not found. {install_hint('rtl_tcp')}", 400)
                     return api_error(f"Failed to start rtl_tcp: {e}", 500)
 
         # Wait for rtl_tcp to start outside lock
@@ -179,7 +196,7 @@ def start_rtlamr() -> Response:
         # Build rtlamr command
         cmd = [
             "rtlamr",
-            "-server=127.0.0.1:1234",
+            f"-server={rtl_tcp_host}:{rtl_tcp_port}" if rtl_tcp_host else "-server=127.0.0.1:1234",
             f"-msgtype={msgtype}",
             f"-format={output_format}",
             f"-centerfreq={int(float(freq) * 1e6)}",
@@ -293,16 +310,12 @@ def stop_rtlamr() -> Response:
 
 @rtlamr_bp.route("/stream_rtlamr")
 def stream_rtlamr() -> Response:
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("rtlamr", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.rtlamr_queue,
             channel_key="rtlamr",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

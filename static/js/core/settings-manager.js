@@ -8,9 +8,10 @@ const Settings = {
         'offline.enabled': false,
         'offline.assets_source': 'local',
         'offline.fonts_source': 'local',
-        'offline.tile_provider': 'cartodb_dark_cyan',
+        'offline.tile_provider': 'esri_world',
         'offline.tile_server_url': '',
         'offline.stadia_key': '',
+        'offline.carto_key': '',
     },
 
     // Tile provider configurations
@@ -25,24 +26,30 @@ const Settings = {
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
             subdomains: 'abcd',
             mapTheme: 'cyber',
-            options: {}
+            options: {},
+            supportsKey: true
         },
         cartodb_dark_cyan: {
             url: 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png',
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
             subdomains: 'abcd',
             mapTheme: 'cyber',
-            options: {}
+            options: {},
+            supportsKey: true
         },
         cartodb_light: {
             url: 'https://cartodb-basemaps-{s}.global.ssl.fastly.net/light_all/{z}/{x}/{y}.png',
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> &copy; <a href="https://carto.com/">CARTO</a>',
-            subdomains: 'abcd'
+            subdomains: 'abcd',
+            supportsKey: true
         },
         esri_world: {
             url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
             attribution: 'Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community',
-            subdomains: null
+            subdomains: null,
+            // Imagery beyond zoom 18 is patchy, and a missing tile comes back as
+            // a "Map data not yet available" image; upscale zoom 18 instead.
+            options: { maxNativeZoom: 18 }
         },
         stadia_dark: {
             url: 'https://tiles.stadiamaps.com/tiles/alidade_smooth_dark/{z}/{x}/{y}{r}.png',
@@ -227,7 +234,7 @@ const Settings = {
         this._cache[key] = value;
 
         // Save to localStorage as backup (exclude sensitive keys)
-        const SENSITIVE_KEYS = ['offline.stadia_key'];
+        const SENSITIVE_KEYS = ['offline.stadia_key', 'offline.carto_key'];
         const toStore = Object.fromEntries(
             Object.entries(this._cache).filter(([k]) => !SENSITIVE_KEYS.includes(k))
         );
@@ -316,6 +323,13 @@ const Settings = {
                 (provider === 'stadia_dark' || provider === 'tactical') ? 'block' : 'none';
         }
 
+        // Show/hide CARTO API key row
+        const cartoKeyRow = document.getElementById('cartoKeyRow');
+        if (cartoKeyRow) {
+            cartoKeyRow.style.display =
+                (this.tileProviders[provider] && this.tileProviders[provider].supportsKey) ? 'block' : 'none';
+        }
+
         // Update tiles immediately for all providers.
         this._updateMapTiles();
         const activeConfig = this.getTileConfig();
@@ -337,6 +351,16 @@ const Settings = {
      */
     async setStadiaKey(key) {
         await this._save('offline.stadia_key', (key || '').trim());
+        this._updateMapTiles();
+    },
+
+    /**
+     * Save CARTO API key and refresh tiles. CartoDB tiles work without a key
+     * but CARTO now watermarks unauthenticated raster tile requests.
+     * @param {string} key
+     */
+    async setCartoKey(key) {
+        await this._save('offline.carto_key', (key || '').trim());
         this._updateMapTiles();
     },
 
@@ -369,12 +393,22 @@ const Settings = {
             };
         }
 
-        // Robust fallback: keep Cyber theme when CartoDB dark is active and Cyber preferred.
-        if (provider === 'cartodb_dark' && this._getMapThemePreference() === 'cyber') {
-            return { ...baseConfig, mapTheme: 'cyber' };
+        let resolvedConfig = baseConfig;
+        if (baseConfig.supportsKey) {
+            // CartoDB raster tiles work without a key but CARTO now watermarks
+            // unauthenticated requests; a free key (carto.com/basemaps/apikey) removes it.
+            const cartoKey = (this.get('offline.carto_key') || '').trim();
+            if (cartoKey) {
+                resolvedConfig = { ...baseConfig, url: baseConfig.url + '?key=' + encodeURIComponent(cartoKey) };
+            }
         }
 
-        return baseConfig;
+        // Robust fallback: keep Cyber theme when CartoDB dark is active and Cyber preferred.
+        if (provider === 'cartodb_dark' && this._getMapThemePreference() === 'cyber') {
+            return { ...resolvedConfig, mapTheme: 'cyber' };
+        }
+
+        return resolvedConfig;
     },
 
     /**
@@ -699,6 +733,18 @@ const Settings = {
                 (currentProvider === 'stadia_dark' || currentProvider === 'tactical') ? 'block' : 'none';
         }
 
+        // CARTO API key input
+        const cartoKeyInput = document.getElementById('cartoKeyInput');
+        if (cartoKeyInput) {
+            cartoKeyInput.value = this.get('offline.carto_key') || '';
+        }
+        const cartoKeyRow = document.getElementById('cartoKeyRow');
+        if (cartoKeyRow) {
+            const currentProvider = this.get('offline.tile_provider');
+            cartoKeyRow.style.display =
+                (this.tileProviders[currentProvider] && this.tileProviders[currentProvider].supportsKey) ? 'block' : 'none';
+        }
+
         // Theme select
         const themeSelect = document.getElementById('themeSelect');
         if (themeSelect) {
@@ -904,10 +950,10 @@ function loadSettingsTools() {
                             <div style="flex: 1; min-width: 0;">
                                 <span style="font-weight: 500;">${toolName}${requiredBadge}</span>
                                 <div style="font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${tool.description}</div>
+                                ${!installed && installCmd ? `
+                                    <code style="display: block; margin-top: 4px; font-size: 10px; background: var(--bg-tertiary); padding: 3px 6px; border-radius: 3px; overflow-wrap: anywhere; user-select: all;" title="Click to select">${installCmd}</code>
+                                ` : ''}
                             </div>
-                            ${!installed && installCmd ? `
-                                <code style="font-size: 9px; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 3px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;" title="${installCmd}">${installCmd}</code>
-                            ` : ''}
                             <span style="font-size: 10px; color: ${dotColor}; font-weight: bold; min-width: 45px; text-align: right;">${installed ? 'OK' : 'MISSING'}</span>
                         </div>
                     `;
@@ -1344,6 +1390,8 @@ function switchSettingsTab(tabName) {
         loadUpdateStatus();
     } else if (tabName === 'location') {
         loadObserverLocation();
+    } else if (tabName === 'sdr') {
+        loadSdrDeviceSettings();
     } else if (tabName === 'alerts') {
         loadVoiceAlertConfig();
         if (typeof AlertCenter !== 'undefined') {
@@ -1485,6 +1533,131 @@ function setThemePreference(value) {
 }
 
 /**
+ * Load per-device SDR configuration into the SDR settings tab.
+ * Built with DOM APIs throughout: names are user-supplied.
+ */
+function loadSdrDeviceSettings() {
+    const container = document.getElementById('settingsSdrDevices');
+    if (!container) return;
+
+    const message = (text) => {
+        const div = document.createElement('div');
+        div.style.cssText = 'text-align: center; padding: 30px; color: var(--text-dim);';
+        div.textContent = text;
+        container.replaceChildren(div);
+    };
+
+    fetch('/devices')
+        .then(r => r.json())
+        .then(devices => {
+            if (!Array.isArray(devices) || devices.length === 0) {
+                message('No SDR devices detected');
+                return;
+            }
+            container.replaceChildren(...devices.map(renderSdrDeviceRow));
+        })
+        .catch(() => message('Could not load devices'));
+}
+
+function renderSdrDeviceRow(device) {
+    const config = device.config || {};
+    const row = document.createElement('div');
+    row.className = 'settings-row';
+    row.style.cssText = 'flex-direction: column; align-items: stretch; gap: 8px;';
+
+    const title = document.createElement('div');
+    title.className = 'settings-label-text';
+    const serial = device.serial && !['N/A', 'Unknown'].includes(device.serial) ? ` (SN: ${device.serial})` : '';
+    title.textContent = `${(device.sdr_type || 'sdr').toUpperCase()} #${device.index}: ${device.hardware_name || device.name}${serial}`;
+    row.appendChild(title);
+
+    if (!device.keyed_by_serial) {
+        const note = document.createElement('div');
+        note.className = 'settings-label-desc';
+        note.style.color = 'var(--accent-orange, #f0a030)';
+        note.textContent = 'No unique serial number: these settings belong to USB position ' +
+            `#${device.index}, not to this dongle, and follow whatever is plugged in there. ` +
+            'Give the dongle its own serial with rtl_eeprom -s to make them follow it.';
+        row.appendChild(note);
+    }
+
+    const field = (label, input) => {
+        const wrap = document.createElement('label');
+        wrap.style.cssText = 'display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px;';
+        const span = document.createElement('span');
+        span.textContent = label;
+        wrap.append(span, input);
+        return wrap;
+    };
+    const input = (type, value, placeholder, attrs = {}) => {
+        const el = document.createElement('input');
+        el.type = type;
+        el.className = 'settings-input';
+        el.value = value ?? '';
+        el.placeholder = placeholder;
+        Object.entries(attrs).forEach(([k, v]) => el.setAttribute(k, v));
+        return el;
+    };
+
+    const name = input('text', config.name, device.hardware_name || 'Display name', { maxlength: 48 });
+    const ppm = input('number', config.ppm, 'Not set (0)', { step: 1, min: -1000, max: 1000 });
+    const gain = input('number', config.gain, 'Not set (mode default)', { step: 0.1, min: 0, max: 102 });
+    const biasT = document.createElement('select');
+    biasT.className = 'settings-input';
+    [['', 'Not set (off)'], ['true', 'On'], ['false', 'Off']].forEach(([value, label]) => {
+        const opt = document.createElement('option');
+        opt.value = value;
+        opt.textContent = label;
+        biasT.appendChild(opt);
+    });
+    biasT.value = config.bias_t === undefined ? '' : String(config.bias_t);
+
+    row.append(
+        field('Name', name),
+        field('PPM correction', ppm),
+        field('Default gain (dB)', gain),
+        field('Bias-T default', biasT),
+    );
+
+    const actions = document.createElement('div');
+    actions.style.cssText = 'display: flex; align-items: center; gap: 10px;';
+    const status = document.createElement('span');
+    status.style.cssText = 'font-size: 11px; color: var(--text-dim);';
+    const save = document.createElement('button');
+    save.type = 'button';
+    save.className = 'check-assets-btn';
+    save.textContent = 'Save';
+    save.addEventListener('click', () => {
+        const body = {
+            name: name.value,
+            ppm: ppm.value,
+            gain: gain.value,
+            bias_t: biasT.value === '' ? null : biasT.value === 'true',
+        };
+        save.disabled = true;
+        fetch(`/devices/config/${encodeURIComponent(device.config_key)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        })
+            .then(r => r.json().then(data => ({ ok: r.ok, data })))
+            .then(({ ok, data }) => {
+                status.style.color = ok ? 'var(--accent-green)' : 'var(--accent-red)';
+                status.textContent = ok ? 'Saved' : (data.message || 'Save failed');
+                if (ok && typeof refreshDevices === 'function') refreshDevices();
+            })
+            .catch(() => {
+                status.style.color = 'var(--accent-red)';
+                status.textContent = 'Save failed';
+            })
+            .finally(() => { save.disabled = false; });
+    });
+    actions.append(save, status);
+    row.appendChild(actions);
+    return row;
+}
+
+/**
  * Set UI tier preference from the Display settings tab
  */
 function setUiTierPreference(tier) {
@@ -1502,3 +1675,31 @@ if (!window._settingsEscapeHandlerBound) {
         }
     });
 }
+
+
+/**
+ * Forget the layout this browser remembers (collapsed sidebars, open
+ * sections, chosen views), keeping settings, presets, watch lists and the
+ * observer location, then reload so every panel starts from its default.
+ */
+const LAYOUT_KEYS = [
+    'mainSidebarCollapsed', 'acarsSidebarCollapsed', 'vdl2SidebarCollapsed',
+    'intercept_nav_groups', 'intercept.runState.expanded',
+    'intercept.gps.skyView', 'intercept.spyStations.view', 'pagerView', 'intercept.map.labels',
+];
+const LAYOUT_PREFIXES = ['intercept.sidebar.open.'];
+
+function resetLayoutPreferences() {
+    if (!window.confirm('Reset the layout?\n\nOpened and collapsed sections and chosen views go back to their defaults. Settings, presets and your location are kept.')) {
+        return;
+    }
+    try {
+        LAYOUT_KEYS.forEach((key) => localStorage.removeItem(key));
+        Object.keys(localStorage)
+            .filter((key) => LAYOUT_PREFIXES.some((prefix) => key.startsWith(prefix)))
+            .forEach((key) => localStorage.removeItem(key));
+    } catch (e) { /* nothing stored */ }
+    window.location.reload();
+}
+
+window.resetLayoutPreferences = resetLayoutPreferences;

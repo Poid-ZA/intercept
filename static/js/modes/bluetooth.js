@@ -6,6 +6,8 @@
 const BluetoothMode = (function() {
     'use strict';
 
+    const LOCATE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="10" r="3"/><path d="M12 21.7C17.3 17 20 13 20 10a8 8 0 1 0-16 0c0 3 2.7 7 8 11.7z"/></svg>';
+
     // State
     let isScanning = false;
     let eventSource = null;
@@ -184,6 +186,12 @@ const BluetoothMode = (function() {
             deviceContainer.addEventListener('click', (event) => {
                 const row = event.target.closest('.bt-device-row[data-bt-device-id]');
                 if (!row) return;
+                // The row's Locate button goes straight to locating, without selecting
+                if (event.target.closest('.bt-row-locate')) {
+                    event.stopPropagation();
+                    locateById(row.dataset.btDeviceId);
+                    return;
+                }
                 selectDevice(row.dataset.btDeviceId);
             });
         }
@@ -852,11 +860,15 @@ const BluetoothMode = (function() {
     function showCapabilityWarning(issues) {
         if (!capabilityStatusEl) return;
         capabilityStatusEl.style.display = 'block';
-        capabilityStatusEl.innerHTML = `
-            <div style="color: #f59e0b; padding: 10px; background: rgba(245,158,11,0.1); border-radius: 6px; font-size: 12px;">
-                ${issues.map(i => `<div>⚠ ${i}</div>`).join('')}
-            </div>
-        `;
+        // The same note as a mode's missing tool on the status card (sidebar-polish.css)
+        const box = document.createElement('div');
+        box.className = 'sb-status-missing';
+        issues.forEach((issue) => {
+            const line = document.createElement('div');
+            line.textContent = issue;
+            box.append(line);
+        });
+        capabilityStatusEl.replaceChildren(box);
     }
 
     function hideCapabilityWarning() {
@@ -1302,13 +1314,13 @@ const BluetoothMode = (function() {
         if (trackerList) {
             if (devices.size === 0) {
                 if (typeof renderCollectionState === 'function') {
-                    renderCollectionState(trackerList, { type: 'empty', message: 'Start scanning to detect trackers' });
+                    renderCollectionState(trackerList, { type: 'empty', message: 'Start scanning to detect trackers. AirTags, Tiles and SmartTags that seem to follow you are listed here, with how sure the match is.' });
                 } else {
                     trackerList.innerHTML = '<div class="app-collection-state is-empty">Start scanning to detect trackers</div>';
                 }
             } else if (deviceStats.trackers.length === 0) {
                 if (typeof renderCollectionState === 'function') {
-                    renderCollectionState(trackerList, { type: 'empty', message: 'No trackers detected' });
+                    renderCollectionState(trackerList, { type: 'empty', message: `No trackers among ${devices.size} device${devices.size === 1 ? '' : 's'} seen` });
                 } else {
                     trackerList.innerHTML = '<div class="app-collection-state is-empty">No trackers detected</div>';
                 }
@@ -1496,10 +1508,8 @@ const BluetoothMode = (function() {
 
         // Bottom meta
         const metaLabel = mfr || addr;  // already HTML-escaped
-        const distM = device.estimated_distance_m;
-        const distStr = distM != null ? '~' + distM.toFixed(1) + 'm' : '';
+        // No distance: one receiver cannot measure it from signal strength
         let metaHtml = '<span>' + metaLabel + '</span>';
-        if (distStr) metaHtml += '<span>' + distStr + '</span>';
         metaHtml += '<span class="bt-row-rssi ' + fillClass + '">' + (rssi != null ? rssi : '—') + '</span>';
         if (seenBefore) metaHtml += '<span class="bt-history-badge">SEEN</span>';
         if (agentName !== 'Local')
@@ -1531,6 +1541,8 @@ const BluetoothMode = (function() {
                 + '</div>'
                 + '<div class="bt-row-top-right">'
                     + flagBadges + statusDot
+                    + '<button type="button" class="locate-action bt-row-locate" title="Locate this device">'
+                        + LOCATE_ICON + 'Locate</button>'
                 + '</div>'
             + '</div>'
             // Bottom line
@@ -1791,11 +1803,13 @@ const BluetoothMode = (function() {
         };
 
         // Always switch to bt_locate mode first (loads script + styles if needed,
-        // initializes the module), then hand off device data.
+        // initializes the module), then hand off device data and start: pressing
+        // Locate means locate, not "go and press Start".
         if (typeof switchMode === 'function') {
             switchMode('bt_locate').then(function() {
                 if (typeof BtLocate !== 'undefined') {
                     BtLocate.handoff(payload);
+                    BtLocate.start();
                 }
             });
         }

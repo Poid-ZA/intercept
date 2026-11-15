@@ -25,11 +25,26 @@ const AppFeedback = (function() {
         return stackEl;
     }
 
+    // Every toast is also kept, for the toolbar's notification history
+    // (partials/nav.html), in session storage so it follows you between pages.
+    const HISTORY_KEY = 'intercept.notices';
+    const HISTORY_MAX = 50;
+
+    function remember(type, title, message) {
+        try {
+            const list = JSON.parse(sessionStorage.getItem(HISTORY_KEY) || '[]');
+            list.push({ t: Date.now(), type, title, message });
+            sessionStorage.setItem(HISTORY_KEY, JSON.stringify(list.slice(-HISTORY_MAX)));
+        } catch (err) { /* the toast still shows */ }
+        window.dispatchEvent(new CustomEvent('intercept:notice'));
+    }
+
     function toast(options) {
         const opts = options || {};
         const type = normalizeType(opts.type);
         const id = nextToastId++;
         const durationMs = Number.isFinite(opts.durationMs) ? opts.durationMs : 6500;
+        remember(type, String(opts.title || defaultTitle(type)), String(opts.message || ''));
 
         const root = document.createElement('div');
         root.className = `app-toast ${type}`;
@@ -142,7 +157,8 @@ const AppFeedback = (function() {
                 return;
             }
 
-            const message = extractMessage(event && event.error) || String(event.message || 'Unknown error');
+            // Browser warnings such as the ResizeObserver loop notice carry no error object
+            const message = event && event.error ? extractMessage(event.error) : String((event && event.message) || 'Unknown error');
             if (shouldIgnore(message)) return;
             toast({
                 type: 'warning',
@@ -164,13 +180,14 @@ const AppFeedback = (function() {
 
     function normalizeType(type) {
         const t = String(type || 'info').toLowerCase();
-        if (t === 'error' || t === 'warning') return t;
+        if (t === 'error' || t === 'warning' || t === 'success') return t;
         return 'info';
     }
 
     function defaultTitle(type) {
         if (type === 'error') return 'Error';
         if (type === 'warning') return 'Warning';
+        if (type === 'success') return 'Done';
         return 'Notice';
     }
 
@@ -184,7 +201,8 @@ const AppFeedback = (function() {
 
     function shouldIgnore(message) {
         const text = String(message || '').toLowerCase();
-        return text.includes('script error') || text.includes('resizeobserver loop limit exceeded');
+        // "loop limit exceeded" (older Chrome) and "loop completed with undelivered notifications" are both benign
+        return text.includes('script error') || text.includes('resizeobserver loop');
     }
 
     function renderCollectionState(container, options) {
@@ -438,6 +456,14 @@ window.isTransientOrOffline = function(error) {
     return AppFeedback.isTransientOrOffline(error);
 };
 
+// A top-level const is not a property of window; code that checks
+// window.AppFeedback (the nav, showInfo) needs it to be.
+window.AppFeedback = AppFeedback;
+
+// A page can use the toasts without the global error handlers by loading
+// this script with data-global-handlers="off" (the dashboards do).
+const appFeedbackScript = document.currentScript;
 document.addEventListener('DOMContentLoaded', () => {
+    if (appFeedbackScript && appFeedbackScript.dataset.globalHandlers === 'off') return;
     AppFeedback.init();
 });

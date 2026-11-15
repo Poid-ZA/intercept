@@ -37,8 +37,13 @@ const RunState = (function() {
         meteor: 'Meteor',
     };
 
+    // Idle modes are folded behind a "+N idle" chip unless expanded.
+    const EXPANDED_KEY = 'intercept.runState.expanded';
+    const DASHBOARDS = { adsb: '/adsb/dashboard', ais: '/ais/dashboard' };
+
     let refreshTimer = null;
     let activeMode = null;
+    let expanded = readExpanded();
     let lastHealth = null;
     let lastErrorToastAt = 0;
 
@@ -46,38 +51,18 @@ const RunState = (function() {
         const root = document.getElementById('runStateStrip');
         if (!root) return;
 
-        wireActions();
         wrapModeSwitch();
         activeMode = inferCurrentMode();
         renderHealth(null);
         refresh();
 
         if (!refreshTimer) {
-            refreshTimer = window.setInterval(refresh, REFRESH_MS);
+            refreshTimer = VisibleInterval.set(refresh, REFRESH_MS);
         }
 
         document.addEventListener('visibilitychange', () => {
             if (!document.hidden) refresh();
         });
-    }
-
-    function wireActions() {
-        const refreshBtn = document.getElementById('runStateRefreshBtn');
-        if (refreshBtn) {
-            refreshBtn.addEventListener('click', () => refresh());
-        }
-
-        const settingsBtn = document.getElementById('runStateSettingsBtn');
-        if (settingsBtn) {
-            settingsBtn.addEventListener('click', () => {
-                if (typeof showSettings === 'function') {
-                    showSettings();
-                    if (typeof switchSettingsTab === 'function') {
-                        switchSettingsTab('tools');
-                    }
-                }
-            });
-        }
     }
 
     function wrapModeSwitch() {
@@ -90,7 +75,9 @@ const RunState = (function() {
                 activeMode = normalizeMode(String(mode));
             }
             const result = original.apply(this, arguments);
-            markActiveChip();
+            // The mode now in view is always shown, so redraw rather than re-mark
+            if (lastHealth) renderHealth(lastHealth);
+            else markActiveChip();
             return result;
         };
         wrapped.__runStateWrapped = true;
@@ -103,6 +90,8 @@ const RunState = (function() {
             const data = await response.json();
             lastHealth = data;
             renderHealth(data);
+            // Shared with LiveEmptyState, so the page polls /health once.
+            window.dispatchEvent(new CustomEvent('intercept:health', { detail: data }));
         } catch (err) {
             renderHealth(null, err);
             const transient = isTransientFailure(err);
@@ -129,15 +118,82 @@ const RunState = (function() {
             return;
         }
 
+        // Running modes and the mode in view; the rest behind "+N idle"
         const processes = normalizeProcesses(data.processes || {});
-        for (const mode of CHIP_MODES) {
-            const isRunning = Boolean(processes[mode]);
-            chipsContainer.appendChild(buildChip(modeLabels[mode] || mode.toUpperCase(), isRunning, mode));
+        const current = normalizeMode(activeMode || inferCurrentMode());
+        const running = CHIP_MODES.filter((mode) => processes[mode]);
+        const shown = running.concat(CHIP_MODES.includes(current) && !running.includes(current) ? [current] : []);
+        const idle = CHIP_MODES.filter((mode) => !shown.includes(mode));
+
+        if (!running.length) {
+            const note = document.createElement('span');
+            note.className = 'run-state-note';
+            note.textContent = 'Nothing running';
+            chipsContainer.appendChild(note);
+        }
+        shown.forEach((mode) => {
+            chipsContainer.appendChild(buildChip(modeLabels[mode] || mode.toUpperCase(), Boolean(processes[mode]), mode));
+        });
+        if (expanded) {
+            idle.forEach((mode) => {
+                const chip = buildChip(modeLabels[mode] || mode.toUpperCase(), false, mode);
+                chip.classList.add('idle');
+                chipsContainer.appendChild(chip);
+            });
+        }
+        if (idle.length) {
+            const more = document.createElement('button');
+            more.type = 'button';
+            more.className = 'run-state-chip run-state-more';
+            more.setAttribute('aria-expanded', String(expanded));
+            more.textContent = expanded ? 'Show less' : `+${idle.length} idle`;
+            more.addEventListener('click', () => {
+                expanded = !expanded;
+                try { localStorage.setItem(EXPANDED_KEY, expanded ? '1' : '0'); } catch (err) { /* this visit only */ }
+                renderHealth(lastHealth);
+            });
+            chipsContainer.appendChild(more);
         }
 
-        const counts = data.data || {};
-        summaryEl.textContent = `Aircraft ${counts.aircraft_count || 0} | Vessels ${counts.vessel_count || 0} | WiFi ${counts.wifi_networks_count || 0} | BT ${counts.bt_devices_count || 0}`;
+        renderCounts(summaryEl, data.data || {});
         markActiveChip();
+    }
+
+    // What is in view right now, as chips that open their mode; zeros are left out.
+    const COUNT_CHIPS = [
+        { key: 'aircraft_count', mode: 'adsb', label: 'aircraft', icon: '<path d="M21 16v-2l-8-5V3.5a1.5 1.5 0 0 0-3 0V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>' },
+        { key: 'vessel_count', mode: 'ais', label: 'vessels', icon: '<path d="M3 18l2 2h14l2-2"/><path d="M5 18v-4a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2v4"/><path d="M12 12V6"/>' },
+        { key: 'wifi_networks_count', mode: 'wifi', label: 'Wi-Fi networks', icon: '<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/>' },
+        { key: 'bt_devices_count', mode: 'bluetooth', label: 'Bluetooth devices', icon: '<path d="M7 7l10 10-5 5V2l5 5L7 17"/>' },
+    ];
+
+    function renderCounts(el, counts) {
+        const chips = COUNT_CHIPS.filter((c) => Number(counts[c.key]) > 0).map((c) => {
+            const chip = document.createElement('button');
+            chip.type = 'button';
+            chip.className = 'run-state-count';
+            chip.title = `${counts[c.key]} ${c.label} in view. Open.`;
+            chip.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" ' +
+                'stroke-linejoin="round" aria-hidden="true">' + c.icon + '</svg>';  // fixed markup from COUNT_CHIPS
+            chip.append(document.createTextNode(String(counts[c.key])));
+            chip.addEventListener('click', () => openMode(c.mode));
+            return chip;
+        });
+        el.replaceChildren(...chips);
+        el.hidden = !chips.length;
+    }
+
+    function readExpanded() {
+        try { return localStorage.getItem(EXPANDED_KEY) === '1'; } catch (err) { return false; }
+    }
+
+    /** Go to a mode from its chip: ADS-B and AIS have their own dashboards. */
+    function openMode(mode) {
+        if (DASHBOARDS[mode]) {
+            window.location.href = DASHBOARDS[mode];
+        } else if (window.INTERCEPT_MODES && window.INTERCEPT_MODES[mode] && typeof window.switchMode === 'function') {
+            window.switchMode(mode);
+        }
     }
 
     function buildChip(label, running, mode) {
@@ -145,6 +201,19 @@ const RunState = (function() {
         chip.className = `run-state-chip${running ? ' running' : ''}`;
         if (mode) {
             chip.dataset.mode = mode;
+            if (DASHBOARDS[mode] || (window.INTERCEPT_MODES && window.INTERCEPT_MODES[mode])) {
+                chip.classList.add('link');
+                chip.setAttribute('role', 'button');
+                chip.tabIndex = 0;
+                chip.title = running ? `${label} is running. Open it.` : `Open ${label}`;
+                chip.addEventListener('click', () => openMode(mode));
+                chip.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter' || event.key === ' ') {
+                        event.preventDefault();
+                        openMode(mode);
+                    }
+                });
+            }
         }
 
         const dot = document.createElement('span');
@@ -254,7 +323,7 @@ const RunState = (function() {
 
     function destroy() {
         if (refreshTimer) {
-            clearInterval(refreshTimer);
+            VisibleInterval.clear(refreshTimer);
             refreshTimer = null;
         }
     }

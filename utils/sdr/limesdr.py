@@ -77,7 +77,13 @@ class LimeSDRCommandBuilder(CommandBuilder):
 
         return cmd
 
-    def build_adsb_command(self, device: SDRDevice, gain: float | None = None, bias_t: bool = False) -> list[str]:
+    def build_adsb_command(
+        self,
+        device: SDRDevice,
+        gain: float | None = None,
+        bias_t: bool = False,
+        ppm: int | None = None,
+    ) -> list[str]:
         """
         Build dump1090 command with SoapySDR support for ADS-B decoding.
 
@@ -88,7 +94,17 @@ class LimeSDRCommandBuilder(CommandBuilder):
         device_str = self._build_device_string(device)
 
         # Try readsb first (better SoapySDR support), fallback to dump1090
-        cmd = ["readsb", "--net", "--device-type", "soapysdr", "--device", device_str, "--quiet"]
+        cmd = [
+            "readsb",
+            "--net",
+            "--net-sbs-port",
+            "30003",
+            "--device-type",
+            "soapysdr",
+            "--soapy-device",
+            device_str,
+            "--quiet",
+        ]
 
         if gain is not None:
             cmd.extend(["--gain", str(int(gain))])
@@ -131,6 +147,7 @@ class LimeSDRCommandBuilder(CommandBuilder):
         tcp_port: int = 10110,
         udp_host: str | None = None,
         udp_port: int | None = None,
+        ppm: int | None = None,
     ) -> list[str]:
         """
         Build AIS-catcher command for AIS vessel tracking with LimeSDR.

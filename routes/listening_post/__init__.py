@@ -9,6 +9,7 @@ This package splits the listening post into sub-modules:
 
 from __future__ import annotations
 
+import errno
 import os
 import queue
 import shutil
@@ -17,7 +18,7 @@ import struct
 import subprocess
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
 from flask import Blueprint
@@ -54,6 +55,7 @@ audio_lock = threading.Lock()
 audio_start_lock = threading.Lock()
 audio_running = False
 audio_frequency = 0.0
+audio_start_error: BaseException | None = None  # why the last start failed, for the route
 audio_modulation = "fm"
 audio_source = "process"
 audio_start_token = 0
@@ -176,7 +178,7 @@ def add_activity_log(event_type: str, frequency: float, details: str = ""):
     """Add entry to activity log."""
     with activity_log_lock:
         entry = {
-            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "timestamp": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "type": event_type,
             "frequency": frequency,
             "details": details,
@@ -202,7 +204,8 @@ def _start_audio_stream(
     bias_t: bool | None = None,
 ):
     """Start audio streaming at given frequency."""
-    global audio_process, audio_rtl_process, audio_running, audio_frequency, audio_modulation
+    global audio_process, audio_rtl_process, audio_running, audio_frequency, audio_modulation, audio_start_error
+    audio_start_error = None
 
     # Stop existing stream and snapshot config under lock
     with audio_lock:
@@ -211,6 +214,7 @@ def _start_audio_stream(
         ffmpeg_path = find_ffmpeg()
         if not ffmpeg_path:
             logger.error("ffmpeg not found")
+            audio_start_error = FileNotFoundError(errno.ENOENT, "not found", "ffmpeg")
             return
 
         # Snapshot runtime tuning config so the spawned demod command cannot
@@ -243,6 +247,7 @@ def _start_audio_stream(
         rtl_fm_path = find_rtl_fm()
         if not rtl_fm_path:
             logger.error("rtl_fm not found")
+            audio_start_error = FileNotFoundError(errno.ENOENT, "not found", "rtl_fm")
             return
 
         freq_hz = int(frequency * 1e6)
@@ -269,6 +274,7 @@ def _start_audio_stream(
         rx_fm_path = find_rx_fm()
         if not rx_fm_path:
             logger.error(f"rx_fm not found - required for {resolved_sdr_type.value}. Install SoapySDR utilities.")
+            audio_start_error = FileNotFoundError(errno.ENOENT, "not found", "rx_fm")
             return
 
         sdr_device = SDRFactory.create_default_device(resolved_sdr_type, index=device_index)
@@ -282,7 +288,10 @@ def _start_audio_stream(
             squelch=squelch_value,
             bias_t=bias_t_enabled,
         )
-        sdr_cmd[0] = rx_fm_path
+        # Only swap in the resolved rx_fm binary; HackRF FM returns a
+        # bash -c rx_sdr | csdr pipeline whose argv[0] must stay bash.
+        if os.path.basename(sdr_cmd[0]) == "rx_fm":
+            sdr_cmd[0] = rx_fm_path
 
     encoder_cmd = [
         ffmpeg_path,
@@ -444,6 +453,7 @@ def _start_audio_stream(
 
     except Exception as e:
         logger.error(f"Failed to start audio stream: {e}")
+        audio_start_error = e
 
 
 def _stop_audio_stream():
@@ -472,25 +482,57 @@ def _stop_audio_stream_internal():
 
     had_processes = audio_process is not None or audio_rtl_process is not None
 
-    # Kill the pipeline processes and their groups
+    # Kill the pipeline processes and their groups.
+    # Send SIGTERM first so rtl_fm / rx_fm can run their librtlsdr cleanup
+    # handlers (libusb_release_interface / libusb_close) and release the USB
+    # endpoint cleanly.  Only fall back to SIGKILL if the process does not
+    # exit within the timeout — SIGKILL bypasses those handlers and leaves
+    # USB interfaces in a stalled state (usb_claim_interface error -6).
     if audio_process:
         try:
-            # Kill entire process group (SDR demod + ffmpeg)
-            try:
-                os.killpg(os.getpgid(audio_process.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            pgid = os.getpgid(audio_process.pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                audio_process.terminate()
+            audio_process.wait(timeout=PROCESS_TERMINATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    audio_process.kill()
+            else:
                 audio_process.kill()
-            audio_process.wait(timeout=0.5)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                audio_process.wait(timeout=1.0)
         except Exception:
             pass
 
     if audio_rtl_process:
         try:
-            try:
-                os.killpg(os.getpgid(audio_rtl_process.pid), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
+            pgid = os.getpgid(audio_rtl_process.pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
+        try:
+            if pgid is not None:
+                os.killpg(pgid, signal.SIGTERM)
+            else:
+                audio_rtl_process.terminate()
+            audio_rtl_process.wait(timeout=PROCESS_TERMINATE_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            if pgid is not None:
+                try:
+                    os.killpg(pgid, signal.SIGKILL)
+                except (ProcessLookupError, PermissionError):
+                    audio_rtl_process.kill()
+            else:
                 audio_rtl_process.kill()
-            audio_rtl_process.wait(timeout=0.5)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                audio_rtl_process.wait(timeout=1.0)
         except Exception:
             pass
 

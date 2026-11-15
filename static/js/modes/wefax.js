@@ -576,7 +576,7 @@ var WeFax = (function () {
                 statusLabel.style.color = '#666';
             } else {
                 statusLabel.textContent = 'IDLE';
-                statusLabel.style.color = '#444';
+                statusLabel.style.color = 'var(--text-dim)';
             }
         }
 
@@ -923,7 +923,7 @@ var WeFax = (function () {
     function startCountdownTimer() {
         stopCountdownTimer();
         updateCountdown();
-        state.countdownInterval = setInterval(function () {
+        state.countdownInterval = VisibleInterval.set(function () {
             updateCountdown();
             updateTimelineCursor();
         }, 1000);
@@ -1032,7 +1032,7 @@ var WeFax = (function () {
 
     function stopCountdownTimer() {
         if (state.countdownInterval) {
-            clearInterval(state.countdownInterval);
+            VisibleInterval.clear(state.countdownInterval);
             state.countdownInterval = null;
         }
     }

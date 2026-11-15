@@ -3,6 +3,7 @@ Offline mode routes - Asset management and settings for offline operation.
 """
 
 import os
+from pathlib import Path
 
 from flask import Blueprint, request
 
@@ -17,9 +18,10 @@ OFFLINE_DEFAULTS = {
     # Default to bundled assets/fonts to avoid third-party CDN privacy blocks.
     "offline.assets_source": "local",
     "offline.fonts_source": "local",
-    "offline.tile_provider": "cartodb_dark_cyan",
+    "offline.tile_provider": "esri_world",
     "offline.tile_server_url": "",
     "offline.stadia_key": "",
+    "offline.carto_key": "",
 }
 
 # Asset paths to check
@@ -138,11 +140,18 @@ def check_asset():
     if not path.startswith("/static/vendor/"):
         return api_error("Invalid path", 400)
 
-    # Remove leading slash and construct full path
-    relative_path = path.lstrip("/")
-    app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    full_path = os.path.join(app_root, relative_path)
+    # The prefix check above is not containment: "/static/vendor/../../etc"
+    # satisfies it. Resolve and assert the result is genuinely inside the
+    # vendor directory, matching the pattern in routes/recordings.py.
+    app_root = Path(__file__).resolve().parent.parent
+    vendor_root = (app_root / "static" / "vendor").resolve()
+    try:
+        full_path = (app_root / path.lstrip("/")).resolve()
+        if vendor_root != full_path and vendor_root not in full_path.parents:
+            return api_error("Invalid path", 400)
+    except Exception:
+        return api_error("Invalid path", 400)
 
-    exists = os.path.exists(full_path)
+    exists = full_path.exists()
 
     return api_success(data={"path": path, "exists": exists})

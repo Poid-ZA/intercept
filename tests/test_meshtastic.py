@@ -14,6 +14,36 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+
+@pytest.fixture
+def mesh_history():
+    """Empty stored-message table; returns a helper that stores one message."""
+    from utils.database import get_db, store_meshtastic_message
+
+    with get_db() as conn:
+        conn.execute("DELETE FROM meshtastic_messages")
+
+    def store(**fields):
+        msg = {
+            "packet_id": None,
+            "timestamp": 1769515200.0,
+            "from": "!a1b2c3d4",
+            "from_name": None,
+            "to": "^all",
+            "to_name": None,
+            "message": "hello",
+            "portnum": "TEXT_MESSAGE_APP",
+            "channel": 0,
+            "rssi": -95,
+            "snr": -3.5,
+            "hop_limit": 3,
+        }
+        msg.update(fields)
+        return store_meshtastic_message(msg)
+
+    return store
+
+
 # =============================================================================
 # Utility Module Tests
 # =============================================================================
@@ -85,6 +115,102 @@ class TestMeshtasticMessage:
         assert d["message"] is None
         assert d["rssi"] is None
         assert d["snr"] is None
+        assert d["packet_id"] is None
+
+    def test_message_carries_packet_id(self):
+        from utils.meshtastic import MeshtasticMessage
+
+        msg = MeshtasticMessage(
+            from_id="!00000001",
+            to_id="^all",
+            message="hi",
+            portnum="TEXT_MESSAGE_APP",
+            channel=0,
+            rssi=None,
+            snr=None,
+            hop_limit=None,
+            timestamp=datetime.now(timezone.utc),
+            raw_packet={"id": 123456789},
+        )
+        assert msg.to_dict()["packet_id"] == 123456789
+
+
+class TestMeshtasticMessageHistory:
+    """Received messages are stored so history survives reconnects and restarts."""
+
+    def _message(self, packet_id, text="hello"):
+        from utils.meshtastic import MeshtasticMessage
+
+        return MeshtasticMessage(
+            from_id="!a1b2c3d4",
+            to_id="^all",
+            message=text,
+            portnum="TEXT_MESSAGE_APP",
+            channel=0,
+            rssi=-90,
+            snr=5.0,
+            hop_limit=3,
+            timestamp=datetime.now(timezone.utc),
+            raw_packet={"id": packet_id} if packet_id is not None else {},
+        )
+
+    def test_callback_stores_and_streams(self, mesh_history):
+        import queue
+
+        from routes import meshtastic as routes
+        from utils.database import get_meshtastic_messages
+
+        with patch.object(routes, "_mesh_queue", queue.Queue()) as q, patch.object(routes, "_recent_messages", []):
+            routes._message_callback(self._message(42, "stored"))
+            assert q.qsize() == 1
+        assert [m["message"] for m in get_meshtastic_messages()] == ["stored"]
+
+    def test_repeated_packet_is_stored_and_streamed_once(self, mesh_history):
+        """A rebroadcast or Store & Forward replay of a packet already seen."""
+        import queue
+
+        from routes import meshtastic as routes
+        from utils.database import get_meshtastic_messages
+
+        with patch.object(routes, "_mesh_queue", queue.Queue()) as q, patch.object(routes, "_recent_messages", []):
+            routes._message_callback(self._message(42))
+            routes._message_callback(self._message(42))
+            assert q.qsize() == 1
+        assert len(get_meshtastic_messages()) == 1
+
+    def test_packets_without_id_are_always_kept(self, mesh_history):
+        assert mesh_history(packet_id=None)
+        assert mesh_history(packet_id=None)
+        from utils.database import get_meshtastic_messages
+
+        assert len(get_meshtastic_messages()) == 2
+
+    def test_same_packet_id_from_another_node_is_kept(self, mesh_history):
+        assert mesh_history(packet_id=7, **{"from": "!00000001"})
+        assert mesh_history(packet_id=7, **{"from": "!00000002"})
+
+    def test_callback_still_streams_when_db_fails(self):
+        import queue
+
+        from routes import meshtastic as routes
+
+        with (
+            patch.object(routes, "store_meshtastic_message", side_effect=RuntimeError("disk full")),
+            patch.object(routes, "_mesh_queue", queue.Queue()) as q,
+            patch.object(routes, "_recent_messages", []),
+        ):
+            routes._message_callback(self._message(1))
+            assert q.qsize() == 1
+
+    def test_cleanup_removes_only_old_messages(self, mesh_history):
+        import time
+
+        from utils.database import cleanup_old_meshtastic_messages, get_meshtastic_messages
+
+        mesh_history(packet_id=1, timestamp=time.time() - 100 * 86400, message="old")
+        mesh_history(packet_id=2, timestamp=time.time(), message="new")
+        assert cleanup_old_meshtastic_messages(max_age_days=90) == 1
+        assert [m["message"] for m in get_meshtastic_messages()] == ["new"]
 
 
 class TestChannelConfig:
@@ -355,7 +481,7 @@ class TestMeshtasticRoutes:
             assert response.status_code == 400
             assert "Must provide" in data["message"]
 
-    def test_messages_empty(self, client):
+    def test_messages_empty(self, client, mesh_history):
         """GET /meshtastic/messages should return empty list initially."""
         with patch("routes.meshtastic._recent_messages", []):
             response = client.get("/meshtastic/messages")
@@ -366,34 +492,50 @@ class TestMeshtasticRoutes:
             assert data["messages"] == []
             assert data["count"] == 0
 
-    def test_messages_with_limit(self, client):
+    def test_messages_with_limit(self, client, mesh_history):
         """GET /meshtastic/messages should respect limit param."""
-        test_messages = [{"id": i} for i in range(10)]
+        for i in range(10):
+            mesh_history(packet_id=i, timestamp=1000 + i, message=f"m{i}")
 
-        with patch("routes.meshtastic._recent_messages", test_messages):
-            response = client.get("/meshtastic/messages?limit=3")
-            data = json.loads(response.data)
+        response = client.get("/meshtastic/messages?limit=3")
+        data = json.loads(response.data)
 
-            assert response.status_code == 200
-            assert len(data["messages"]) == 3
-            # Should return last 3 (most recent)
-            assert data["messages"][0]["id"] == 7
+        assert response.status_code == 200
+        # The 3 most recent, oldest first
+        assert [m["message"] for m in data["messages"]] == ["m7", "m8", "m9"]
 
-    def test_messages_filter_by_channel(self, client):
+    def test_messages_filter_by_channel(self, client, mesh_history):
         """GET /meshtastic/messages should filter by channel."""
-        test_messages = [
-            {"id": 1, "channel": 0},
-            {"id": 2, "channel": 1},
-            {"id": 3, "channel": 0},
-        ]
+        mesh_history(packet_id=1, channel=0)
+        mesh_history(packet_id=2, channel=1)
+        mesh_history(packet_id=3, channel=0)
 
-        with patch("routes.meshtastic._recent_messages", test_messages):
-            response = client.get("/meshtastic/messages?channel=0")
-            data = json.loads(response.data)
+        response = client.get("/meshtastic/messages?channel=0")
+        data = json.loads(response.data)
 
-            assert response.status_code == 200
-            assert len(data["messages"]) == 2
-            assert all(m["channel"] == 0 for m in data["messages"])
+        assert response.status_code == 200
+        assert len(data["messages"]) == 2
+        assert all(m["channel"] == 0 for m in data["messages"])
+
+    def test_messages_survive_a_new_session(self, client, mesh_history):
+        """Stored history is returned even when this session has received nothing."""
+        mesh_history(packet_id=5, message="from yesterday", from_name="Base")
+        with patch("routes.meshtastic._recent_messages", []):
+            data = json.loads(client.get("/meshtastic/messages").data)
+        (msg,) = data["messages"]
+        assert msg["text"] == msg["message"] == "from yesterday"
+        assert msg["from"] == "!a1b2c3d4"
+        assert msg["from_name"] == "Base"
+        assert msg["packet_id"] == 5
+
+    def test_messages_fall_back_to_session_when_db_fails(self, client):
+        session = [{"message": "live", "channel": 0}]
+        with (
+            patch("routes.meshtastic.get_meshtastic_messages", side_effect=RuntimeError("db locked")),
+            patch("routes.meshtastic._recent_messages", session),
+        ):
+            data = json.loads(client.get("/meshtastic/messages").data)
+        assert data["messages"] == session
 
     def test_stream_endpoint_exists(self, client):
         """GET /meshtastic/stream should return SSE content type."""
@@ -579,3 +721,171 @@ class TestMeshtasticOwnNodeGpsFeedsObserverLocation:
         node = client._nodes[0x55890AEB]
         assert node.latitude == -33.9
         assert node.longitude == 18.4
+
+
+class TestMessageTimestamp:
+    """Message time should be when the radio heard it, not when it reached us."""
+
+    def _receive(self, packet):
+        from utils.meshtastic import MeshtasticClient
+
+        client = MeshtasticClient()
+        received = []
+        client._callback = received.append
+        client._on_receive(packet, None)
+        return received[0]
+
+    def test_uses_rx_time_for_queued_messages(self):
+        """A message the node held while we were disconnected keeps its rxTime."""
+        msg = self._receive(
+            {
+                "from": 0xA1B2C3D4,
+                "to": 0xFFFFFFFF,
+                "rxTime": 1769515200,
+                "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "sent earlier"},
+            }
+        )
+        assert msg.to_dict()["timestamp"] == 1769515200.0
+
+    def test_falls_back_to_now_without_rx_time(self):
+        """A node with no clock reports rxTime 0; use arrival time instead."""
+        import time
+
+        before = time.time()
+        msg = self._receive(
+            {
+                "from": 0xA1B2C3D4,
+                "to": 0xFFFFFFFF,
+                "rxTime": 0,
+                "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "hi"},
+            }
+        )
+        assert msg.to_dict()["timestamp"] >= before
+
+
+def _client_with_nodedb():
+    """A client on a mocked device whose NodeDB holds our node and one peer."""
+    from utils.meshtastic import MeshtasticClient
+
+    peer = {"num": 0xA1B2C3D4, "user": {"id": "!a1b2c3d4", "longName": "Peer"}}
+    me = {"num": 0x11111111, "user": {"id": "!11111111", "longName": "Me"}}
+    iface = Mock()
+    iface.myInfo.my_node_num = 0x11111111
+    iface.nodesByNum = {0xA1B2C3D4: peer, 0x11111111: me}
+    iface.nodes = {"!a1b2c3d4": peer, "!11111111": me}
+
+    client = MeshtasticClient()
+    client._interface = iface
+    return client, iface
+
+
+class TestNodeActions:
+    """Favourite / ignore / remove a node in the device's NodeDB (#270)."""
+
+    def test_favorite_tells_device_and_shows_in_node_list(self):
+        client, iface = _client_with_nodedb()
+
+        assert client.manage_node("!a1b2c3d4", "favorite") == (True, None)
+
+        iface.localNode.setFavorite.assert_called_once_with(0xA1B2C3D4)
+        peer = next(n for n in client.get_nodes() if n.num == 0xA1B2C3D4)
+        assert peer.to_dict()["is_favorite"] is True
+
+    def test_unignore_clears_flag_reported_by_device(self):
+        client, iface = _client_with_nodedb()
+        iface.nodesByNum[0xA1B2C3D4]["isIgnored"] = True
+        assert next(n for n in client.get_nodes() if n.num == 0xA1B2C3D4).is_ignored
+
+        assert client.manage_node("!a1b2c3d4", "unignore") == (True, None)
+
+        iface.localNode.removeIgnored.assert_called_once_with(0xA1B2C3D4)
+        assert not next(n for n in client.get_nodes() if n.num == 0xA1B2C3D4).is_ignored
+
+    def test_remove_drops_node_from_list(self):
+        client, iface = _client_with_nodedb()
+        client.get_nodes()
+
+        assert client.manage_node("!a1b2c3d4", "remove") == (True, None)
+
+        iface.localNode.removeNode.assert_called_once_with(0xA1B2C3D4)
+        assert [n.num for n in client.get_nodes()] == [0x11111111]
+
+    def test_refuses_own_node_bad_id_and_unknown_action(self):
+        client, iface = _client_with_nodedb()
+
+        assert client.manage_node("!11111111", "remove")[0] is False
+        assert client.manage_node("!zzzz", "favorite")[0] is False
+        assert client.manage_node("!a1b2c3d4", "explode")[0] is False
+        iface.localNode.removeNode.assert_not_called()
+
+    def test_route_passes_action_to_client(self):
+        from flask import Flask
+
+        from routes.meshtastic import meshtastic_bp
+
+        app = Flask(__name__)
+        app.register_blueprint(meshtastic_bp)
+        mock_client = Mock(is_running=True)
+        mock_client.manage_node.return_value = (False, "Cannot change your own node")
+
+        with patch("routes.meshtastic.get_meshtastic_client", return_value=mock_client):
+            response = app.test_client().post("/meshtastic/nodes/!11111111/remove")
+
+        mock_client.manage_node.assert_called_once_with("!11111111", "remove")
+        assert response.status_code == 400
+        assert response.get_json()["message"] == "Cannot change your own node"
+
+
+class TestReplies:
+    """Native Meshtastic replies: reply_id in, out and stored (#270)."""
+
+    def test_received_reply_carries_reply_id(self):
+        from utils.meshtastic import MeshtasticClient
+
+        client = MeshtasticClient()
+        received = []
+        client._callback = received.append
+        client._on_receive(
+            {
+                "from": 0xA1B2C3D4,
+                "to": 0xFFFFFFFF,
+                "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "agreed", "replyId": 42},
+            },
+            None,
+        )
+        assert received[0].to_dict()["reply_id"] == 42
+
+    def test_send_text_passes_reply_id_to_device(self):
+        client, iface = _client_with_nodedb()
+
+        assert client.send_text("agreed", reply_id=42) == (True, None)
+
+        assert iface.sendData.call_args.kwargs["replyId"] == 42
+
+    def test_reply_id_is_stored(self, mesh_history):
+        from utils.database import get_meshtastic_messages
+
+        mesh_history(packet_id=7, reply_id=42)
+
+        assert get_meshtastic_messages()[0]["reply_id"] == 42
+
+    def test_send_route_validates_reply_id(self):
+        from flask import Flask
+
+        from routes.meshtastic import meshtastic_bp
+
+        app = Flask(__name__)
+        app.register_blueprint(meshtastic_bp)
+        mock_client = Mock(is_running=True)
+        mock_client.send_text.return_value = (True, None)
+
+        with (
+            patch("routes.meshtastic.is_meshtastic_available", return_value=True),
+            patch("routes.meshtastic.get_meshtastic_client", return_value=mock_client),
+        ):
+            bad = app.test_client().post("/meshtastic/send", json={"text": "hi", "reply_id": "42"})
+            good = app.test_client().post("/meshtastic/send", json={"text": "hi", "reply_id": 42})
+
+        assert bad.status_code == 400
+        assert good.status_code == 200
+        assert mock_client.send_text.call_args.kwargs["reply_id"] == 42

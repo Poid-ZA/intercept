@@ -85,9 +85,14 @@ RUN cd /tmp \
     && rm -rf /tmp/rx_tools
 
 # Build acarsdec
+# Upstream hardcodes -march=native, which bakes the build host's ISA (AVX-512 on
+# the CI runners) into the binary and SIGILLs on older CPUs. Keep -Ofast, which
+# upstream reports matters for decoding, and drop the arch flag.
 RUN cd /tmp \
     && git clone --depth 1 https://github.com/TLeconte/acarsdec.git \
     && cd acarsdec \
+    && sed -i 's/ -march=native//' CMakeLists.txt \
+    && ! grep -q 'march=native' CMakeLists.txt \
     && mkdir build && cd build \
     && cmake .. -Drtl=ON -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     && make \
@@ -115,15 +120,6 @@ RUN cd /tmp \
     && make \
     && cp src/dumpvdl2 /staging/usr/bin/dumpvdl2 \
     && rm -rf /tmp/dumpvdl2
-
-# Build slowrx (SSTV decoder) — pinned to known-good commit
-RUN cd /tmp \
-    && git clone https://github.com/windytan/slowrx.git \
-    && cd slowrx \
-    && git checkout ca6d7012 \
-    && make \
-    && install -m 0755 slowrx /staging/usr/local/bin/slowrx \
-    && rm -rf /tmp/slowrx
 
 # Build SatDump (weather satellite decoder - NOAA APT & Meteor LRPT) — pinned to v1.2.2
 # Split into compile (heavy, cached) and staging (light, safe to change) layers

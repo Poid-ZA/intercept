@@ -4,6 +4,13 @@
  * Requires: variables.css, base.css, components.css
  */
 
+/* Thin dark scrollbars (Firefox) on every page; the browser's default is a
+   white bar beside each scrolling panel. Every page loads this file. */
+* {
+    scrollbar-width: thin;
+    scrollbar-color: var(--border-light) transparent;
+}
+
 /* ============================================
    APP SHELL
    ============================================ */
@@ -135,7 +142,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: var(--text-sm);
     color: var(--text-secondary);
 }
@@ -313,6 +320,18 @@
 .nav-tool-btn:hover {
     background: var(--bg-elevated);
     color: var(--text-primary);
+}
+
+/* Kill All Processes - destructive, so it reads as distinct from the
+   other nav tools rather than sitting among them unremarked. */
+.nav-killall-btn {
+    color: var(--accent-red, #ff3366);
+}
+
+.nav-killall-btn:hover {
+    color: var(--accent-red, #ff3366);
+    border-color: var(--accent-red, #ff3366);
+    background: rgba(255, 51, 102, 0.12);
 }
 
 /* ============================================
@@ -938,7 +957,7 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: 11px;
     flex-shrink: 0;
     white-space: nowrap;
@@ -1006,6 +1025,21 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
+}
+
+/* Mode icons in the group buttons and their dropdown menus. The generic .icon
+   size lives in core/components.css, which only the main page loads, so on
+   the dashboards these rendered at 0x0 (just a caret once labels hide). */
+.mode-nav .nav-icon {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    flex-shrink: 0;
+}
+
+.mode-nav .nav-icon svg {
+    width: 100%;
+    height: 100%;
 }
 
 .nav-tool-btn .icon svg {
@@ -1107,9 +1141,16 @@ a.nav-dashboard-btn:hover {
 
 [data-theme="light"] .mode-nav-dropdown.has-active .mode-nav-dropdown-btn {
     background: rgba(31, 95, 168, 0.06);
+    color: var(--text-primary);
     border-left: 2px solid var(--accent-cyan);
     box-shadow: -2px 0 6px rgba(31, 95, 168, 0.12);
     padding-left: 12px;
+}
+
+/* index.css darkens the active group's icon for its filled button; not here */
+[data-theme="light"] .mode-nav-dropdown.has-active .mode-nav-dropdown-btn .nav-icon {
+    filter: none;
+    color: var(--accent-cyan);
 }
 
 [data-theme="light"] .mode-nav-dropdown-menu {
@@ -1190,7 +1231,7 @@ a.nav-dashboard-btn:hover {
 /* ============================================
    ENHANCED TIER — signals teal console nav framing
    ============================================ */
-[data-ui-tier="enhanced"] .mode-nav {
+[data-ui-tier="enhanced"]:not([data-theme="light"]) .mode-nav {
     background: linear-gradient(180deg, rgba(4, 8, 8, 0.95), rgba(2, 4, 4, 0.92));
 }
 
@@ -1200,7 +1241,7 @@ a.nav-dashboard-btn:hover {
     background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
 }
 
-[data-ui-tier="enhanced"] .mode-nav-btn.active {
+[data-ui-tier="enhanced"]:not([data-theme="light"]) .mode-nav-btn.active {
     background: rgba(46, 125, 138, 0.08);
     color: var(--accent-cyan);
     border-left: 2px solid var(--accent-cyan);
@@ -1235,7 +1276,7 @@ a.nav-dashboard-btn:hover {
 [data-ui-tier="enhanced"] .nav-tier-btn .icon-tier-enhanced { display: flex; }
 
 /* Enhanced tier toggle button styling */
-[data-ui-tier="enhanced"] .nav-tier-btn {
+[data-ui-tier="enhanced"]:not([data-theme="light"]) .nav-tier-btn {
     background: rgba(46, 125, 138, 0.10);
     border-color: rgba(46, 125, 138, 0.38);
     color: #2e7d8a;
@@ -1243,7 +1284,364 @@ a.nav-dashboard-btn:hover {
     text-shadow: 0 0 6px rgba(46, 125, 138, 0.25);
 }
 
-[data-ui-tier="enhanced"] .nav-tier-btn:hover {
+[data-ui-tier="enhanced"]:not([data-theme="light"]) .nav-tier-btn:hover {
     background: rgba(46, 125, 138, 0.16);
     border-color: rgba(46, 125, 138, 0.55);
+}
+
+/* Toolbar "More" menu (partials/nav.html): labelled rows for the less-used tools */
+.nav-more {
+    position: relative;
+}
+
+.nav-tools .nav-more-btn {
+    width: auto;
+    gap: 5px;
+    padding: 0 9px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+.nav-more-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    min-width: 220px;
+    padding: 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-card);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.nav-more-menu[hidden] {
+    display: none;
+}
+
+.nav-tools .nav-more-menu .nav-more-item {
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 10px;
+    width: 100%;
+    height: auto;
+    min-height: 34px;
+    padding: 6px 10px !important;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font: 500 12px var(--font-sans) !important;
+    letter-spacing: normal !important;
+    text-align: left;
+    color: var(--text-secondary);
+    text-shadow: none;
+}
+
+.nav-more-menu .nav-more-item:hover,
+.nav-more-menu .nav-more-item:focus-visible {
+    background: rgba(var(--accent-cyan-rgb), 0.1);
+    color: var(--text-primary);
+}
+
+.nav-more-label {
+    display: none;
+}
+
+.nav-more-menu .nav-more-label {
+    display: inline;
+    flex: 1;
+    order: 1;
+}
+
+.nav-more-menu .nav-more-item .icon {
+    order: 0;
+}
+
+.nav-tools .nav-more-menu .nav-more-item.nav-tier-btn {
+    background: transparent;
+    color: var(--text-secondary);
+}
+
+/* The display mode's current setting, as a badge at the row's end */
+.nav-more-menu .nav-tier-btn .tier-label-lean,
+.nav-more-menu .nav-tier-btn .tier-label-enhanced {
+    order: 2;
+    font: 600 9px var(--font-mono);
+    letter-spacing: 0.08em;
+    color: var(--accent-cyan);
+}
+
+.nav-tools .nav-killall-btn {
+    width: auto;
+    gap: 5px;
+    padding: 0 9px;
+    color: var(--accent-red);
+    border-color: rgba(226, 93, 93, 0.4);
+}
+
+.nav-killall-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+}
+
+body.nav-more-open .app-toast-stack {
+    visibility: hidden;
+}
+
+/* Notification history (partials/nav.html) */
+.nav-notices {
+    position: relative;
+}
+
+.nav-notices-btn {
+    position: relative;
+}
+
+/* Inside the button's corner: the toolbar clips anything outside its row */
+.nav-notices-count {
+    position: absolute;
+    top: 1px;
+    right: 1px;
+    z-index: 1;
+    min-width: 13px;
+    height: 13px;
+    padding: 0 3px;
+    border-radius: 7px;
+    background: var(--accent-red);
+    box-shadow: 0 0 0 1.5px var(--bg-primary);
+    color: #fff;
+    font: 700 8px/13px var(--font-sans);
+    text-align: center;
+    pointer-events: none;
+}
+
+.nav-notices-count[hidden] {
+    display: none;
+}
+
+.nav-notices-panel {
+    position: absolute;
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 2000;
+    width: 340px;
+    max-height: 420px;
+    display: flex;
+    flex-direction: column;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-card);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.nav-notices-panel[hidden] {
+    display: none;
+}
+
+.nav-notices-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 9px 12px;
+    border-bottom: 1px solid var(--border-color);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+}
+
+.nav-notices-head button {
+    padding: 2px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 10px;
+    cursor: pointer;
+}
+
+.nav-notices-list {
+    overflow-y: auto;
+    padding: 6px;
+}
+
+.nav-notices-empty {
+    padding: 16px 10px;
+    color: var(--text-dim);
+    font-size: 12px;
+    text-align: center;
+}
+
+.nav-notice {
+    padding: 7px 9px 7px 11px;
+    border-left: 3px solid var(--notice, var(--accent-cyan));
+    border-radius: 4px;
+    font-size: 12px;
+}
+
+.nav-notice + .nav-notice {
+    margin-top: 4px;
+}
+
+.nav-notice.unread {
+    background: rgba(var(--accent-cyan-rgb), 0.07);
+}
+
+.nav-notice.error { --notice: var(--accent-red); }
+.nav-notice.warning { --notice: var(--accent-amber); }
+.nav-notice.success { --notice: var(--accent-green); }
+
+.nav-notice-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    color: var(--text-primary);
+}
+
+.nav-notice-head span {
+    flex: 0 0 auto;
+    font-size: 10px;
+    color: var(--text-dim);
+}
+
+.nav-notice-msg {
+    margin-top: 2px;
+    white-space: pre-line;
+    overflow-wrap: anywhere;
+    color: var(--text-secondary);
+}
+
+body.nav-notices-open .app-toast-stack {
+    visibility: hidden;
+}
+
+/* A visible focus ring for keyboard users on every page (core/base.css has
+   one, but the main page does not load it) */
+:focus-visible {
+    outline: 2px solid var(--accent-cyan);
+    outline-offset: 2px;
+}
+
+:focus:not(:focus-visible) {
+    outline: none;
+}
+
+/* Loading placeholder, the same everywhere: a small spinner and dim text */
+.ui-loading {
+    color: var(--text-dim);
+    font-size: 11px;
+    text-align: center;
+}
+
+div.ui-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px;
+}
+
+.ui-loading::before {
+    content: '';
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 12px;
+    height: 12px;
+    margin-right: 6px;
+    vertical-align: -2px;
+    border: 2px solid rgba(var(--accent-cyan-rgb), 0.25);
+    border-top-color: var(--accent-cyan);
+    border-radius: 50%;
+    animation: ui-loading-spin 0.9s linear infinite;
+}
+
+div.ui-loading::before {
+    margin-right: 0;
+}
+
+@keyframes ui-loading-spin {
+    to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .ui-loading::before {
+        animation: none;
+        border-top-color: rgba(var(--accent-cyan-rgb), 0.25);
+    }
+}
+
+/* Labelled toolbar buttons never squeeze or wrap ("Mo", "Sto al"); where
+   the toolbar is short of room they drop to icons, keeping their tooltips */
+.nav-tools .nav-more-btn,
+.nav-tools .nav-killall-btn {
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+@media (max-width: 1620px) {
+    .nav-tools .nav-more-btn,
+    .nav-tools .nav-killall-btn {
+        width: 28px;
+        padding: 0;
+        gap: 0;
+    }
+
+    .nav-more-text,
+    .nav-killall-label,
+    .nav-dashboard-btn .nav-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+}
+
+/* Between the 1024px single-row nav and ~1400px the seven group labels push
+   the tool buttons off the right edge; show the group icons only, with
+   tighter padding so the row still fits at 1024px */
+@media (max-width: 1400px) {
+    /* Scoped to .mode-nav so it outranks the same rule in index.css (loaded later) */
+    .mode-nav .mode-nav-dropdown-btn,
+    .mode-nav .mode-nav-dropdown.has-active .mode-nav-dropdown-btn {
+        padding: 8px;
+        gap: 4px;
+    }
+
+    .mode-nav-dropdown-btn .nav-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+    }
+}
+
+/* Checkboxes, radios and sliders in the accent colour, not the browser's
+   default blue (core/base.css does this, but the main page does not load it);
+   a page's own accent-color still wins */
+input[type="checkbox"],
+input[type="radio"],
+input[type="range"] {
+    accent-color: var(--accent-cyan);
+}
+
+/* Tell the browser which theme is showing, so its own controls match:
+   number spinners, date pickers, open dropdown lists and scrollbar corners
+   were drawn light on the dark theme */
+:root {
+    color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
 }

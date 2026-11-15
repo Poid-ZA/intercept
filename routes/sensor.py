@@ -4,22 +4,22 @@ from __future__ import annotations
 
 import contextlib
 import json
-import math
 import queue
 import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Any
 
 from flask import Blueprint, Response, jsonify, request
 
 import app as app_module
-from utils.event_pipeline import process_event
+from utils.dependencies import install_hint
 from utils.logging import sensor_logger as logger
-from utils.process import register_process, unregister_process
+from utils.observations import emit_observation
+from utils.process import register_process, terminate_together, unregister_process
 from utils.responses import api_error, api_success
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
@@ -28,6 +28,7 @@ from utils.validation import (
     validate_ppm,
     validate_rtl_tcp_host,
     validate_rtl_tcp_port,
+    validate_sensor_units,
 )
 
 sensor_bp = Blueprint("sensor", __name__)
@@ -39,36 +40,6 @@ sensor_active_sdr_type: str | None = None
 # RSSI history per device (model_id -> list of (timestamp, rssi))
 sensor_rssi_history: dict[str, list[tuple[float, float]]] = {}
 _MAX_RSSI_HISTORY = 60
-
-
-def _build_scope_waveform(rssi: float, snr: float, noise: float, points: int = 256) -> list[int]:
-    """Synthesize a compact waveform from rtl_433 level metrics."""
-    points = max(32, min(points, 512))
-
-    # rssi is usually negative; stronger signals are closer to 0 dBm.
-    rssi_norm = min(max(abs(rssi) / 40.0, 0.0), 1.0)
-    snr_norm = min(max((snr + 5.0) / 35.0, 0.0), 1.0)
-    noise_norm = min(max(abs(noise) / 40.0, 0.0), 1.0)
-
-    amplitude = max(0.06, min(1.0, (0.6 * rssi_norm + 0.4 * snr_norm) - (0.22 * noise_norm)))
-    cycles = 3.0 + (snr_norm * 8.0)
-    harmonic = 0.25 + (0.35 * snr_norm)
-    hiss = 0.08 + (0.18 * noise_norm)
-    phase = (time.monotonic() * (1.4 + (snr_norm * 2.2))) % (2.0 * math.pi)
-
-    waveform: list[int] = []
-    for i in range(points):
-        t = i / (points - 1)
-        base = math.sin((2.0 * math.pi * cycles * t) + phase)
-        overtone = math.sin((2.0 * math.pi * (cycles * 2.4) * t) + (phase * 0.7))
-        noise_wobble = math.sin((2.0 * math.pi * (cycles * 7.0) * t) + (phase * 2.1))
-
-        sample = amplitude * (base + (harmonic * overtone) + (hiss * noise_wobble))
-        sample /= 1.0 + harmonic + hiss
-        packed = int(round(max(-1.0, min(1.0, sample)) * 127.0))
-        waveform.append(max(-127, min(127, packed)))
-
-    return waveform
 
 
 def stream_sensor_output(process: subprocess.Popen[bytes]) -> None:
@@ -87,6 +58,16 @@ def stream_sensor_output(process: subprocess.Popen[bytes]) -> None:
                 data["type"] = "sensor"
                 app_module.sensor_queue.put(data)
 
+                # Activity feed: emitted here, at ingestion, so it is recorded
+                # whether or not a browser is subscribed to the stream.
+                if data.get("model"):
+                    sensor_id = ":".join(
+                        str(p) for p in (data["model"], data.get("id"), data.get("channel")) if p not in (None, "")
+                    )
+                    emit_observation(
+                        "sensor", sensor_id, rssi=data.get("rssi"), summary=data["model"], raw=data, direct=True
+                    )
+
                 # Track RSSI history per device
                 _model = data.get("model", "")
                 _dev_id = data.get("id", "")
@@ -97,31 +78,6 @@ def stream_sensor_output(process: subprocess.Popen[bytes]) -> None:
                     hist.append((time.time(), float(_rssi_val)))
                     if len(hist) > _MAX_RSSI_HISTORY:
                         del hist[: len(hist) - _MAX_RSSI_HISTORY]
-
-                # Push scope event when signal level data is present
-                rssi = data.get("rssi")
-                snr = data.get("snr")
-                noise = data.get("noise")
-                if rssi is not None or snr is not None:
-                    try:
-                        rssi_value = float(rssi) if rssi is not None else 0.0
-                        snr_value = float(snr) if snr is not None else 0.0
-                        noise_value = float(noise) if noise is not None else 0.0
-                        app_module.sensor_queue.put_nowait(
-                            {
-                                "type": "scope",
-                                "rssi": rssi_value,
-                                "snr": snr_value,
-                                "noise": noise_value,
-                                "waveform": _build_scope_waveform(
-                                    rssi=rssi_value,
-                                    snr=snr_value,
-                                    noise=noise_value,
-                                ),
-                            }
-                        )
-                    except (TypeError, ValueError, queue.Full):
-                        pass
 
                 # Log if enabled
                 if app_module.logging_enabled:
@@ -174,6 +130,7 @@ def start_sensor() -> Response:
             return api_error("Sensor already running", 409)
 
         data = request.json or {}
+        data = apply_device_defaults(data)
 
         # Validate inputs
         try:
@@ -181,6 +138,7 @@ def start_sensor() -> Response:
             gain = validate_gain(data.get("gain", "0"))
             ppm = validate_ppm(data.get("ppm", "0"))
             device = validate_device_index(data.get("device", "0"))
+            units = validate_sensor_units(data.get("units", "si"))
         except ValueError as e:
             return api_error(str(e), 400)
 
@@ -246,6 +204,10 @@ def start_sensor() -> Response:
         # Disable stats reporting to suppress "row count limit 50 reached" warnings
         cmd.extend(["-M", "level", "-M", "stats:0"])
 
+        # Unit conversion: let rtl_433 normalise units rather than converting
+        # in the frontend, so logged and displayed values always agree.
+        cmd.extend(["-C", units])
+
         try:
             app_module.sensor_process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             register_process(app_module.sensor_process)
@@ -283,7 +245,7 @@ def start_sensor() -> Response:
                 app_module.release_sdr_device(sensor_active_device, sensor_active_sdr_type or "rtlsdr")
                 sensor_active_device = None
                 sensor_active_sdr_type = None
-            return api_error("rtl_433 not found. Install with: brew install rtl_433")
+            return api_error(f"rtl_433 not found. {install_hint('rtl_433')}")
         except Exception as e:
             # Release device on failure
             if sensor_active_device is not None:
@@ -299,11 +261,8 @@ def stop_sensor() -> Response:
 
     with app_module.sensor_lock:
         if app_module.sensor_process:
-            app_module.sensor_process.terminate()
-            try:
-                app_module.sensor_process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                app_module.sensor_process.kill()
+            # Waits until rtl_433 has exited, so the SDR is free when released
+            terminate_together([app_module.sensor_process])
             app_module.sensor_process = None
 
             # Release device from registry
@@ -319,16 +278,12 @@ def stop_sensor() -> Response:
 
 @sensor_bp.route("/stream_sensor")
 def stream_sensor() -> Response:
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("sensor", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.sensor_queue,
             channel_key="sensor",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

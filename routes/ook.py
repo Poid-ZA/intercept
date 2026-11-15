@@ -18,12 +18,12 @@ from typing import Any
 from flask import Blueprint, Response, jsonify, request
 
 import app as app_module
-from utils.event_pipeline import process_event
 from utils.logging import sensor_logger as logger
 from utils.ook import ook_parser_thread
 from utils.process import register_process, safe_terminate, unregister_process
 from utils.responses import api_error
 from utils.sdr import SDRFactory, SDRType
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream_fanout
 from utils.validation import (
     validate_device_index,
@@ -73,6 +73,7 @@ def start_ook() -> Response:
                 return api_error("OOK decoder already running", 409)
 
         data = request.json or {}
+        data = apply_device_defaults(data)
 
         try:
             freq = validate_frequency(data.get("frequency", "433.920"))
@@ -276,11 +277,9 @@ def cleanup_ook(*, emit_status: bool = True) -> None:
     if _ook_stop_event:
         _ook_stop_event.set()
 
-    # Close pipes so parser thread unblocks from readline()
-    _close_pipe(getattr(proc, "stdout", None))
-    _close_pipe(getattr(proc, "stderr", None))
-
-    # Kill the entire process group so child processes are cleaned up
+    # Kill the entire process group so child processes are cleaned up.
+    # This is what unblocks the parser's readline(): the pipe reaches EOF.
+    # Closing the pipes first does not; close() waits on the blocked reader.
     try:
         pgid = os.getpgid(proc.pid)
         os.killpg(pgid, signal.SIGTERM)
@@ -292,6 +291,8 @@ def cleanup_ook(*, emit_status: bool = True) -> None:
     except (ProcessLookupError, OSError):
         # Process already dead — fall back to normal terminate
         safe_terminate(proc)
+    _close_pipe(getattr(proc, "stdout", None))
+    _close_pipe(getattr(proc, "stderr", None))
     unregister_process(proc)
     app_module.ook_process = None
 
@@ -333,16 +334,12 @@ def ook_status() -> Response:
 
 @ook_bp.route("/ook/stream")
 def ook_stream() -> Response:
-    def _on_msg(msg: dict[str, Any]) -> None:
-        process_event("ook", msg, msg.get("type"))
-
     response = Response(
         sse_stream_fanout(
             source_queue=app_module.ook_queue,
             channel_key="ook",
             timeout=1.0,
             keepalive_interval=30.0,
-            on_message=_on_msg,
         ),
         mimetype="text/event-stream",
     )

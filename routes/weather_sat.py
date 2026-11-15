@@ -15,6 +15,7 @@ from flask import Blueprint, Response, jsonify, request, send_file
 
 from utils.logging import get_logger
 from utils.responses import api_error
+from utils.sdr.device_config import apply_device_defaults
 from utils.sse import sse_stream
 from utils.validation import (
     validate_device_index,
@@ -165,13 +166,17 @@ def start_capture():
         )
 
     data = request.get_json(silent=True) or {}
+    data = apply_device_defaults(data)
     sdr_type_str = data.get("sdr_type", "rtlsdr")
 
-    if sdr_type_str != "rtlsdr":
+    from utils.weather_sat import SATDUMP_SOURCES
+
+    if sdr_type_str not in SATDUMP_SOURCES:
+        supported = ", ".join(s.replace("_", " ").title() for s in SATDUMP_SOURCES)
         return jsonify(
             {
                 "status": "error",
-                "message": f"{sdr_type_str.replace('_', ' ').title()} is not yet supported for this mode. Please use an RTL-SDR device.",
+                "message": f"{sdr_type_str.replace('_', ' ').title()} is not supported for this mode. Supported: {supported}.",
             }
         ), 400
 
@@ -238,6 +243,7 @@ def start_capture():
         bias_t=bias_t,
         rtl_tcp_host=rtl_tcp_host,
         rtl_tcp_port=rtl_tcp_port,
+        sdr_type=sdr_type_str,
     )
 
     if success:

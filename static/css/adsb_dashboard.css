@@ -58,49 +58,6 @@ body {
     flex-direction: column;
     overflow: hidden;
 }
-
-/* Animated radar sweep background */
-.radar-bg {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background-image:
-        var(--noise-image),
-        linear-gradient(var(--grid-line) 1px, transparent 1px),
-        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-    background-size: 40px 40px, 50px 50px, 50px 50px;
-    pointer-events: none;
-    z-index: 0;
-}
-
-/* Scan line effect - subtle */
-.scanline {
-    position: fixed;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent-cyan), transparent);
-    color: var(--accent-cyan);
-    animation: scan 6s linear infinite;
-    pointer-events: none;
-    z-index: 1000;
-    opacity: 0.25;
-    box-shadow: 0 0 8px currentColor;
-}
-
-@keyframes scan {
-    0% {
-        top: -4px;
-    }
-
-    100% {
-        top: 100vh;
-    }
-}
-
 /* Header */
 .header {
     position: relative;
@@ -176,36 +133,6 @@ body {
     font-size: 11px;
     flex-wrap: nowrap;
 }
-
-.agent-selector-compact {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.agent-selector-compact .agent-select-sm {
-    padding: 4px 8px;
-    background: var(--bg-card);
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    color: var(--text-primary);
-    font-size: 11px;
-    font-family: var(--font-mono);
-}
-
-.agent-selector-compact .agent-status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--accent-green);
-    box-shadow: 0 0 6px var(--accent-green);
-}
-
-.agent-selector-compact .agent-status-dot.offline {
-    background: var(--accent-red);
-    box-shadow: 0 0 6px var(--accent-red);
-}
-
 .agent-selector-compact .show-all-label {
     display: flex;
     align-items: center;
@@ -228,19 +155,6 @@ body {
     background: var(--accent-red);
     box-shadow: 0 0 10px var(--accent-red);
 }
-
-@keyframes pulse {
-
-    0%,
-    100% {
-        opacity: 1;
-    }
-
-    50% {
-        opacity: 0.5;
-    }
-}
-
 .back-link {
     color: var(--accent-cyan);
     text-decoration: none;
@@ -774,7 +688,7 @@ body {
     background: rgba(0, 0, 0, 0.3);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: 11px;
     color: var(--text-dim);
     white-space: pre-wrap;
@@ -1066,7 +980,7 @@ body {
 }
 
 .telemetry-value {
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: 12px;
     color: var(--accent-cyan);
 }
@@ -1122,7 +1036,7 @@ body {
 }
 
 .aircraft-icao {
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: 9px;
     color: var(--text-secondary);
     background: rgba(var(--accent-cyan-rgb), 0.1);
@@ -1132,7 +1046,7 @@ body {
 
 .aircraft-details {
     display: grid;
-    grid-template-columns: repeat(3, 1fr);
+    grid-template-columns: repeat(4, 1fr);  /* ALT, SPD, HDG, V/S on one line */
     gap: 6px;
     font-size: 10px;
 }
@@ -1142,7 +1056,7 @@ body {
 }
 
 .aircraft-detail-value {
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     color: var(--accent-cyan);
     font-size: 11px;
 }
@@ -1292,23 +1206,83 @@ body {
     accent-color: var(--accent-orange, #ff6400);
 }
 
+/* Airband is now a compact chip that opens a popover, so the group itself
+   is just a positioning wrapper (no panel chrome / no flex-grow). */
 .control-group.airband-group {
-    background: rgba(245, 158, 11, 0.05);
-    border-color: rgba(245, 158, 11, 0.2);
-    flex: 1 1 auto;
-    min-width: 0;
-}
-
-.control-group.airband-group > .control-group-items {
+    background: transparent;
+    border: none;
+    padding: 0;
+    flex: 0 0 auto;
+    position: relative;
     display: flex;
-    flex-wrap: wrap;
     align-items: center;
-    gap: 5px;
 }
 
-.control-group.airband-group .control-group-label {
-    color: var(--accent-orange);
+/* Compact chip trigger */
+.airband-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 11px;
+    border: 1px solid rgba(245, 158, 11, 0.4);
+    border-radius: 6px;
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--accent-orange, #ff9d3c);
+    font-size: 11px;
+    cursor: pointer;
+    white-space: nowrap;
 }
+.airband-chip:hover { background: rgba(245, 158, 11, 0.16); }
+.airband-chip.open { background: rgba(245, 158, 11, 0.2); }
+.airband-chip-label { font-weight: 600; letter-spacing: 0.04em; }
+.airband-chip-freq { font-family: var(--font-data, monospace); color: var(--text-primary, #fff); }
+.airband-chip-caret { transition: transform 0.15s; }
+.airband-chip.open .airband-chip-caret { transform: rotate(180deg); }
+.airband-chip-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--text-dim, #667);
+    flex-shrink: 0;
+}
+.airband-chip-dot.listening {
+    background: var(--accent-green, #00ff88);
+    box-shadow: 0 0 6px var(--accent-green, #00ff88);
+    animation: airbandDot 1.4s ease-in-out infinite;
+}
+@keyframes airbandDot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+
+/* Popover panel — positioned with position:fixed (via JS) so it escapes the
+   controls bar's overflow clipping; opens above the chip. */
+.airband-panel {
+    position: fixed;
+    z-index: 1200;
+    width: 300px;
+    max-width: 78vw;
+    padding: 12px;
+    background: var(--bg-panel, #0e1620);
+    border: 1px solid rgba(245, 158, 11, 0.3);
+    border-radius: 8px;
+    box-shadow: 0 8px 28px rgba(0, 0, 0, 0.6);
+}
+.airband-panel[hidden] { display: none; }
+.airband-panel-title {
+    font-family: 'Orbitron', var(--font-sans);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    color: var(--accent-orange, #ff9d3c);
+    margin-bottom: 10px;
+}
+.control-group.airband-group > .airband-panel > .control-group-items {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+}
+.airband-panel .airband-controls,
+.airband-panel select { width: 100%; }
+.airband-panel .airband-sliders { width: 100%; justify-content: space-between; }
+.airband-panel .airband-sliders input[type="range"] { flex: 1; width: auto; }
+.airband-panel .airband-btn { width: 100%; justify-content: center; }
+.airband-panel .airband-visualizer { width: 100%; justify-content: center; display: flex; }
 
 .airband-sliders {
     display: flex;
@@ -1610,36 +1584,6 @@ body {
     border-radius: 3px;
     background: rgba(0, 0, 0, 0.4);
 }
-
-/* GPS Indicator */
-.gps-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-    padding: 2px 8px;
-    background: rgba(34, 197, 94, 0.15);
-    border: 1px solid #22c55e;
-    border-radius: 12px;
-    font-size: 10px;
-    font-weight: 600;
-    color: #22c55e;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.gps-indicator .gps-dot {
-    width: 6px;
-    height: 6px;
-    background: #22c55e;
-    border-radius: 50%;
-    animation: gps-pulse 2s ease-in-out infinite;
-}
-
-@keyframes gps-pulse {
-    0%, 100% { opacity: 1; transform: scale(1); }
-    50% { opacity: 0.5; transform: scale(0.8); }
-}
-
 /* ============================================
    TRACKED AIRCRAFT PULSATING RING
    ============================================ */
@@ -1880,7 +1824,7 @@ body {
 }
 
 .strip-value {
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-size: 14px;
     font-weight: 600;
     color: var(--accent-cyan);
@@ -2227,7 +2171,7 @@ body {
     color: var(--text-inverse);
 }
 
-html[data-ui-tier="enhanced"] .strip-btn.primary {
+html[data-ui-tier="enhanced"]:not([data-theme="light"]) .strip-btn.primary {
     background: linear-gradient(135deg, rgba(46, 125, 138, 0.85) 0%, rgba(20, 88, 100, 0.80) 100%);
 }
 
@@ -2274,7 +2218,7 @@ html[data-ui-tier="enhanced"] .strip-btn.primary {
     font-size: 11px;
     font-weight: 500;
     color: var(--accent-cyan);
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     padding-left: 8px;
     border-left: 1px solid rgba(var(--accent-cyan-rgb), 0.2);
     white-space: nowrap;
@@ -2428,7 +2372,7 @@ html[data-ui-tier="enhanced"] .strip-btn.primary {
 }
 
 .squawk-code {
-    font-family: var(--font-mono);
+    font-family: var(--font-data);
     font-weight: 700;
     color: var(--accent-cyan);
     font-size: 12px;
@@ -2468,7 +2412,7 @@ html[data-ui-tier="enhanced"] .strip-btn.primary {
 /* ============================================
    ENHANCED TIER — signals teal console
    ============================================ */
-html[data-ui-tier="enhanced"] {
+html[data-ui-tier="enhanced"]:not([data-theme="light"]) {
     --bg-dark: #000000;
     --bg-panel: #020404;
     --bg-card: #020404;
@@ -2497,4 +2441,133 @@ html[data-ui-tier="lean"] {
 html[data-ui-tier="lean"] .scanline,
 html[data-ui-tier="lean"] .radar-bg {
     display: none;
+}
+
+/* Trend line beside a strip value (components/strip-spark.js) */
+.strip-stat.has-spark {
+    display: grid;
+    grid-template-columns: auto 60px;
+    grid-template-rows: auto auto;
+    column-gap: 8px;
+    align-items: center;
+}
+
+.strip-stat.has-spark .strip-value,
+.strip-stat.has-spark .strip-label {
+    grid-column: 1;
+    justify-self: center;
+}
+
+.strip-spark {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    width: 60px;
+    height: 20px;
+}
+
+.strip-spark polyline {
+    fill: none;
+    stroke: var(--accent-cyan);
+    stroke-width: 1.5;
+    vector-effect: non-scaling-stroke;
+}
+
+/* Reception outline reset (components/reception-outline.js) */
+.reach-reset {
+    padding: 0 6px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 18px;
+    cursor: pointer;
+}
+
+.reach-reset:hover {
+    border-color: var(--accent-cyan);
+    color: var(--accent-cyan);
+}
+
+/* Control bar: when the groups do not fit on one line, the bar wraps onto a
+   second row. Before, it squeezed instead: the Airband group folded its
+   controls into a column, and every group in the row stretched to that
+   height with its controls pinned to the bottom. */
+.controls-bar {
+    flex-wrap: wrap;
+    align-items: flex-start !important;
+    overflow-x: visible;
+}
+
+.controls-bar > .control-group > .control-group-items {
+    margin-top: 0;
+}
+
+.control-group.airband-group {
+    flex: 0 0 auto;
+}
+
+.control-group.airband-group > .control-group-items {
+    flex-wrap: nowrap;
+}
+
+/* Light theme: panels and text that hard-code dark-theme colours
+   (generated to match; the dark theme is unaffected) */
+html[data-theme="light"] .vdl2-modal-overlay {
+    background: rgba(18, 32, 52, 0.35);  /* a backdrop: dims the page */
+}
+
+html[data-theme="light"] .vdl2-modal {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .vdl2-modal-msg-body {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .vdl2-modal-raw-json {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .telemetry-item {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .aircraft-item {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .control-group input[type="text"],
+html[data-theme="light"] .control-group input[type="number"] {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] #airbandSpectrumCanvas {
+    background: var(--bg-card);
+}
+
+html[data-theme="light"] .report-modal {
+    background: rgba(18, 32, 52, 0.35);  /* a backdrop: dims the page */
+}
+
+html[data-theme="light"] .highlight-item.emergency .highlight-type {
+    color: var(--text-primary);
+}
+
+html[data-theme="light"] .squawk-modal {
+    background: rgba(18, 32, 52, 0.35);  /* a backdrop: dims the page */
+}
+
+/* ...but their active, selected and hover states keep their own colours */
+html[data-theme="light"] .aircraft-item:hover { background: rgba(var(--accent-cyan-rgb), 0.05); }
+html[data-theme="light"] .aircraft-item.selected { background: rgba(var(--accent-cyan-rgb), 0.1); }
+
+/* Aircraft rows: an edge in the altitude colour, as on the map
+   (styleAircraftRow), and faded when the aircraft has gone quiet */
+.aircraft-item {
+    border-left: 3px solid var(--alt-color, rgba(var(--accent-cyan-rgb), 0.15));
+}
+
+.aircraft-item.stale {
+    opacity: 0.55;
 }

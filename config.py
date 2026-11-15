@@ -7,10 +7,557 @@ import os
 import sys
 
 # Application version
-VERSION = "2.32.0"
+VERSION = "2.33.89"
 
 # Changelog - latest release notes (shown on welcome screen)
 CHANGELOG = [
+    {
+        "version": "2.33.89",
+        "date": "November 2026",
+        "highlights": [
+            "ISS SSTV and general SSTV now use each SDR's saved PPM correction.",
+            "macOS setup uses Homebrew's dump1090 instead of compiling its own.",
+        ],
+    },
+    {
+        "version": "2.33.88",
+        "date": "November 2026",
+        "highlights": [
+            "No more GPS errors on the main page when a GPS receiver has a fix.",
+        ],
+    },
+    {
+        "version": "2.33.87",
+        "date": "November 2026",
+        "highlights": [
+            "Pager, DSC, APRS and Morse can now decode from a remote rtl_tcp server.",
+            "Squelch now works on the HackRF and remote rtl_tcp listening post.",
+        ],
+    },
+    {
+        "version": "2.33.86",
+        "date": "November 2026",
+        "highlights": [
+            "macOS setup can build dump1090 from source again when Homebrew's copy isn't usable.",
+            "Lower memory use in the waterfall and Sub-GHz Inspect, and faster TSCM correlation.",
+        ],
+    },
+    {
+        "version": "2.33.85",
+        "date": "November 2026",
+        "highlights": [
+            "Setup works again on Intel Macs, and builds dump1090 when Homebrew's copy isn't usable.",
+            "Faster Morse and WEFAX decoding, and lower memory use in Sub-GHz Inspect.",
+            "Setup shows the INTERCEPT version and stops clearly on Python older than 3.10.",
+        ],
+    },
+    {
+        "version": "2.33.84",
+        "date": "November 2026",
+        "highlights": [
+            "ISS SSTV keeps the Doppler reading on screen instead of flickering with 'Listening...'.",
+        ],
+    },
+    {
+        "version": "2.33.83",
+        "date": "November 2026",
+        "highlights": [
+            "Each GitHub release now includes an SBOM (sbom.json) listing INTERCEPT's dependencies.",
+        ],
+    },
+    {
+        "version": "2.33.82",
+        "date": "November 2026",
+        "highlights": [
+            "ISS SSTV no longer stops and freezes when Doppler correction retunes the radio.",
+            "SSTV shows why the decoder stopped instead of hanging on the last status.",
+        ],
+    },
+    {
+        "version": "2.33.81",
+        "date": "November 2026",
+        "highlights": [
+            "ADS-B starts again on HackRF and other SoapySDR devices with current readsb.",
+            "HackRF FM listening works, and HackRF gain is split sensibly between LNA and VGA.",
+            "macOS setup: no false 'missing tools' for Linux-only tools, and dumpvdl2 builds.",
+            "Meshtastic map no longer jumps, and node buttons respond reliably.",
+        ],
+    },
+    {
+        "version": "2.33.80",
+        "date": "November 2026",
+        "highlights": [
+            "Decoded-message store with search, watchlists and push alerts (ntfy, Telegram, webhook).",
+            "CoT export to ATAK, WinTAK and TAK Server, and user accounts with a users directory.",
+            "SSTV: FM, USB or LSB, gain and PPM settings, and ISS Doppler correction that now actually runs.",
+            "Docker keeps instance/ on the host; copy it out of a running container before your first rebuild.",
+        ],
+    },
+    {
+        "version": "2.33.79",
+        "date": "October 2026",
+        "highlights": [
+            "On macOS, ACARS and VDL2 keep decoding when the radio sends corrupt data, instead of silently stopping.",
+        ],
+    },
+    {
+        "version": "2.33.78",
+        "date": "October 2026",
+        "highlights": [
+            "ISS SSTV tunes the frequency you enter instead of always using 145.800 MHz.",
+            "Meshtastic: favourite, ignore or remove nodes, search messages, hide non-text packets, and reply to messages.",
+        ],
+    },
+    {
+        "version": "2.33.77",
+        "date": "September 2026",
+        "highlights": [
+            "AIS on a HackRF opens that HackRF, not whichever SDR it finds first.",
+        ],
+    },
+    {
+        "version": "2.33.76",
+        "date": "September 2026",
+        "highlights": [
+            "The in-app updater finds new versions again; it had been stuck reporting v2.33.47.",
+            "AIS works on a HackRF, and Radiosonde says clearly that it needs an RTL-SDR.",
+        ],
+    },
+    {
+        "version": "2.33.75",
+        "date": "September 2026",
+        "highlights": [
+            "An RTL-SDR is the default device again when a HackRF is also plugged in, and the nav icons show on the dashboards.",
+            "Meteor Scatter and Waterfall work with a HackRF even without SoapySDR installed, and Meteor Scatter now says why if it can't start.",
+        ],
+    },
+    {
+        "version": "2.33.74",
+        "date": "September 2026",
+        "highlights": [
+            "New LoRa menu: Meshtastic and Meshcore now have their own group in the nav and on this screen.",
+            "Nav bar fixed in narrow windows on touchscreen laptops and scaled displays, and fits at every desktop width with the extra menu.",
+        ],
+    },
+    {
+        "version": "2.33.73",
+        "date": "September 2026",
+        "highlights": [
+            "Meshcore: search nodes by name or ID, click one to find it on the map, or message it straight from the list.",
+            "Narrow desktop windows now show every mode and tool button in the nav bar instead of an unscrollable strip.",
+        ],
+    },
+    {
+        "version": "2.33.72",
+        "date": "September 2026",
+        "highlights": [
+            "Meshtastic keeps your message history: messages are saved, show on the dashboard straight away (even before you reconnect), and survive restarts. A new Missed button fetches messages sent while you were away from a Store and Forward router.",
+        ],
+    },
+    {
+        "version": "2.33.71",
+        "date": "September 2026",
+        "highlights": [
+            "SubGHz: new capture inspector \u2014 open any saved capture to see its pulses, timings, modulation and decoded bits, then decode that signal live in OOK mode with one click.",
+        ],
+    },
+    {
+        "version": "2.33.70",
+        "date": "September 2026",
+        "highlights": [
+            "HF SSTV now decodes: sideband (USB) is the default, the decoder corrects for tuning error of up to \u00b1200 Hz, and images no longer tear partway down in noise.",
+        ],
+    },
+    {
+        "version": "2.33.69",
+        "date": "September 2026",
+        "highlights": [
+            "SubGHz Frequency Analyzer is fast and sharp \u2014 no more page hang during sweeps.",
+            "Nav bar keeps all its buttons on mid-size windows, and harmless browser warnings no longer pop up as \u201cUnknown error\u201d.",
+        ],
+    },
+    {
+        "version": "2.33.47",
+        "date": "September 2026",
+        "highlights": [
+            "WiFi: capture a WPA handshake or send a deauth in one click from a selected network \u2014 no more copying/pasting the BSSID. (For authorized testing.)",
+        ],
+    },
+    {
+        "version": "2.33.46",
+        "date": "September 2026",
+        "highlights": [
+            "SDR reliability: gentler process shutdown (SIGINT/SIGTERM before SIGKILL), fewer USB bus scans, and skipping re-probes while a device is streaming \u2014 reduces hardware lockups and USB contention (#256, thanks @Dr-gigabyte).",
+        ],
+    },
+    {
+        "version": "2.33.45",
+        "date": "September 2026",
+        "highlights": [
+            'Space weather now shows clear "source unreachable" messages (and a banner) when the server can\u2019t reach NOAA/HamQSL, instead of misleading empty panels.',
+        ],
+    },
+    {
+        "version": "2.33.44",
+        "date": "September 2026",
+        "highlights": [
+            "Bundled the Orbitron display font so dashboard/section titles render correctly instead of falling back to a plain monospace.",
+            "APRS dashboard map now loads your configured tile provider (it was stuck on the fallback grid).",
+            "Space weather: removed a duplicate loading spinner on the flare-probability and related panels.",
+        ],
+    },
+    {
+        "version": "2.33.43",
+        "date": "September 2026",
+        "highlights": [
+            "Meshtastic Nodes tab: each node has a message action that starts a direct message to it (drops its id into the compose box), so you can DM nodes that have no map position (#270).",
+        ],
+    },
+    {
+        "version": "2.33.42",
+        "date": "September 2026",
+        "highlights": [
+            "Meshtastic dashboard: new searchable Nodes tab lists every known node (including those with no map position), with SNR/battery/last-heard; click a node to centre the map on it (#270).",
+        ],
+    },
+    {
+        "version": "2.33.41",
+        "date": "September 2026",
+        "highlights": [
+            "Fixed the Meshtastic/Meshcore dashboards: they now load the core scripts the modules need, restoring the map tile provider and node/message rendering that broke after the dashboard migration (#270).",
+        ],
+    },
+    {
+        "version": "2.33.40",
+        "date": "September 2026",
+        "highlights": [
+            "ADS-B dashboard: the aircraft hover tooltip now stays open and refreshes in place instead of closing on every update.",
+            "Installer: require meshtastic>=2.7.9 to avoid the cosmetic packaging<25 pip dependency-conflict warning.",
+        ],
+    },
+    {
+        "version": "2.33.39",
+        "date": "September 2026",
+        "highlights": [
+            'ADS-B dashboard: a "Tune ATC" button on a selected aircraft tunes the airband receiver to the nearest airport\u2019s tower/approach frequency for that aircraft\u2019s position (#271).',
+        ],
+    },
+    {
+        "version": "2.33.38",
+        "date": "September 2026",
+        "highlights": [
+            'ADS-B dashboard: new "In range" toggle limits the map to aircraft within the selected range, and a "Keep" selector controls how long stale aircraft stay (30s\u201315m) \u2014 helps busy remote/aggregated feeds that were flooding the map (#313).',
+        ],
+    },
+    {
+        "version": "2.33.37",
+        "date": "September 2026",
+        "highlights": [
+            "Housekeeping: the APRS/Meshtastic/Meshcore dashboards now share a common page <head> partial, the docs were brought in line with the dashboard migration, and the satellite dashboard tab title casing was fixed.",
+        ],
+    },
+    {
+        "version": "2.33.36",
+        "date": "September 2026",
+        "highlights": [
+            "Meshtastic dashboard reworked into a map + tabbed side panel (Messages / Channels / Info), with the node map always visible.",
+            "Accessibility: keyboard focus rings and control labels added across the APRS, Meshtastic and Meshcore dashboards.",
+        ],
+    },
+    {
+        "version": "2.33.35",
+        "date": "September 2026",
+        "highlights": [
+            "Meshcore now has its own full-page dashboard (/meshcore/dashboard) with messages, node map, repeaters and telemetry; the Meshcore nav links open it directly. This completes moving the map-centric modes (ADS-B, AIS, satellite, APRS, Meshtastic, Meshcore) out of the main-page SPA into dedicated dashboards.",
+        ],
+    },
+    {
+        "version": "2.33.34",
+        "date": "September 2026",
+        "highlights": [
+            "Meshtastic now has its own full-page dashboard (/meshtastic/dashboard) with the mesh console, node map, messaging and channels; the Meshtastic nav links open it directly.",
+        ],
+    },
+    {
+        "version": "2.33.33",
+        "date": "September 2026",
+        "highlights": [
+            "APRS now has its own full-screen dashboard (/aprs/dashboard) with a full-height map, station list and packet log, matching the Aircraft and Vessels dashboards; the APRS nav links open it directly.",
+        ],
+    },
+    {
+        "version": "2.33.32",
+        "date": "September 2026",
+        "highlights": [
+            "Main page code split finished: the last large inline script (mode switching, SDR device handling, pager and APRS) now lives in static/js/modes/, so index.html is essentially markup plus linked scripts (down from 7,643 to about 4,000 lines).",
+            "No behaviour change — the moved code is byte-for-byte the original, verified by the browser smoke test across every mode.",
+        ],
+    },
+    {
+        "version": "2.33.31",
+        "date": "September 2026",
+        "highlights": [
+            "Main page slimmed: satellite/GPS/drone, device intelligence, Wi-Fi and the 433 MHz/meter feeds now live in their own files (index.html is roughly half its former size).",
+            "Theme now syncs across devices (the sync had been silently 404ing), and the deprecated datetime.utcnow() is gone.",
+        ],
+    },
+    {
+        "version": "2.33.30",
+        "date": "September 2026",
+        "highlights": [
+            "Map labels: callsign and flight level beside aircraft, name and speed beside ships, when zoomed in and never overlapping.",
+            "Ships drawn to their real size and shape when zoomed in; ships at anchor or moored shown as dots.",
+            "Fix: the header's mode chips no longer slide under the nav when the idle modes are shown.",
+        ],
+    },
+    {
+        "version": "2.33.29",
+        "date": "September 2026",
+        "highlights": [
+            "New aircraft icons per type with dark outlines, heading lines on aircraft and ships, and status on the map: on the ground, emergency squawk, gone quiet.",
+            "Satellite Command's map controls no longer cover its panels; modes on slow devices no longer fail to start.",
+        ],
+    },
+    {
+        "version": "2.33.28",
+        "date": "September 2026",
+        "highlights": [
+            "Polish round 7: the 3D globes work offline, native controls match the theme, and Settings gains Reset layout.",
+            "The browser smoke test now covers both themes and phone width; the notification count is no longer cut off.",
+        ],
+    },
+    {
+        "version": "2.33.27",
+        "date": "September 2026",
+        "highlights": [
+            "Polish round 6: a browser smoke test now opens every mode and dashboard on each change and fails on JavaScript errors.",
+            "Inline colours follow the theme; Settings shows full install commands and keeps one height; Quick Setup statuses are clear pills.",
+            "The Wi-Fi channel heatmap and Bluetooth tracker panel explain themselves when empty.",
+        ],
+    },
+    {
+        "version": "2.33.26",
+        "date": "September 2026",
+        "highlights": [
+            "Polish round 5: modes that need an uninstalled tool say so up front, with the install command; a tidier header; the dashboards work in the light theme.",
+            "ADS-B aircraft rows show altitude at a glance and fade when an aircraft goes quiet; the map's zoom-in button is no longer hidden.",
+        ],
+    },
+    {
+        "version": "2.33.25",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: after an upgrade the browser could keep running the previous version's scripts (GPS and Spy Stations errors); asset URLs now carry the version.",
+            "Fix: the toolbar's More and Stop all buttons no longer squeeze on narrower windows.",
+            "Fix: ADS-B and AIS range rings are clearly visible, and the ADS-B control bar no longer leaves tall empty boxes on narrower windows.",
+        ],
+    },
+    {
+        "version": "2.33.24",
+        "date": "September 2026",
+        "highlights": [
+            "Polish round 4: Start/Stop on the sidebar status card, a toolbar with labels and a More menu, notification history, and header chips for what is in view.",
+            "A reception outline on the ADS-B and AIS maps, a 24-hour pass timeline in Satellite Command, a Spy Stations table view, and weather satellite images grouped by pass.",
+            "Readable text (4.5:1 contrast) and keyboard focus rings; Meters no longer merges SCM+ and IDM meters into one card.",
+        ],
+    },
+    {
+        "version": "2.33.23",
+        "date": "September 2026",
+        "highlights": [
+            "WebSDR: flat receiver dots coloured by how busy they are, a grid on the globe, you on it with a path to the receiver you pick, and a list by distance and direction with slots, search and sort.",
+            "WebSDR receiver names and notes no longer show raw HTML.",
+        ],
+    },
+    {
+        "version": "2.33.22",
+        "date": "September 2026",
+        "highlights": [
+            "Polish round 3: the light theme no longer leaves dark panels on a light page, and every page has thin, dark scrollbars.",
+            "Leaner screens: mode descriptions fold behind an (i), the duplicate Kill All button and the bottom bar go where they did nothing, and phones get modes first.",
+            "An idle waterfall that explains itself, WebSDR receivers on first visit, trend lines on the ADS-B and AIS counts, and Settings tabs that fit.",
+        ],
+    },
+    {
+        "version": "2.33.21",
+        "date": "September 2026",
+        "highlights": [
+            "A second polish pass: a status card and section icons in the sidebar, Run State in the header, one kind of pop-up, and a live card on the welcome page.",
+            "433 MHz plots each packet it hears (level, SNR, device) in place of a made-up waveform; OOK draws its last frame as a pulse train; radiosondes get an ascent profile.",
+            "System Health heat grid and gauges, a TSCM threat gauge, ADS-B history traffic by hour, Agents health rings, and maps that open on you.",
+        ],
+    },
+    {
+        "version": "2.33.20",
+        "date": "September 2026",
+        "highlights": [
+            "Activity feed: source tiles with counts, a timeline of the window (click a bar to see that period), source icons and signal bars, and a map of sightings with a position.",
+        ],
+    },
+    {
+        "version": "2.33.19",
+        "date": "September 2026",
+        "highlights": [
+            "A polish pass: the Wi-Fi radar matches the Bluetooth one, BT Locate steers by a hotter / colder signal gauge, and GPS has a sky plot that needs neither WebGL nor the internet.",
+            "Space weather gauges for Kp, solar wind and Bz; empty lists that show when they are listening; a Run State strip that shows what is running.",
+        ],
+    },
+    {
+        "version": "2.33.18",
+        "date": "September 2026",
+        "highlights": [
+            "Stop now stops: pager, 433 MHz and ADS-B end their decoders together and wait until they are gone, and the page says so if one survives.",
+            "Times follow your browser's time zone; ESRI World Imagery is the default map; Locate is on every Bluetooth and Wi-Fi row and starts at once.",
+            "Fix: Bluetooth labelled phones, earbuds and appliances as AirTags and SmartTags; space weather lost its solar wind, Kp and flux data; waterfall clicks replayed in order.",
+        ],
+    },
+    {
+        "version": "2.33.17",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: with two Wi-Fi tabs open, each showed only about half the live updates.",
+            "Signal-strength tooltips no longer show a distance estimate: one receiver cannot measure distance from signal strength.",
+        ],
+    },
+    {
+        "version": "2.33.16",
+        "date": "September 2026",
+        "highlights": [
+            "Alerts, recording, MQTT and the activity feed now handle each event once, whether or not a page is open. Before, they ran once per open browser tab, and not at all with none.",
+        ],
+    },
+    {
+        "version": "2.33.15",
+        "date": "September 2026",
+        "highlights": [
+            "TSCM client report is a printable page: print it, or save it as a PDF. It now includes the baseline comparison and meeting windows, and past sweeps are listed in the survey.",
+            "Fix: drone detection claims its SDR and says which sources started; SubGHz and remote agents name a missing tool; meeting windows were compared an hour out in summer time.",
+        ],
+    },
+    {
+        "version": "2.33.14",
+        "date": "September 2026",
+        "highlights": [
+            "Feat: Activity feed (Intel > Activity). Sightings from every mode that reports them in one stream, newest first, colour-coded by source, filterable by source, time window and device, and pausable without losing anything.",
+            "433 MHz and Wi-Fi record sightings whenever they run; busy sources are thinned so ADS-B cannot swamp the feed, and sightings are kept 24 hours (configurable).",
+        ],
+    },
+    {
+        "version": "2.33.13",
+        "date": "September 2026",
+        "highlights": [
+            'Live lists show elapsed time ("14 s ago"), kept current every second, with the exact time on hover.',
+            'An empty list now says why: "rtl_433 running · 0 readings in 4 s", stopped, or the reason it failed to start.',
+            "Copy buttons on ICAO, MMSI, MAC and node identifiers, and notes and tags on any device, shown wherever it appears.",
+            "Hidden tabs stop their clocks and status polls; install advice matches your platform.",
+        ],
+    },
+    {
+        "version": "2.33.12",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: stopping Morse or OOK could hang indefinitely, and a failed pager start left the SDR marked busy until restart.",
+            "Fix: one corrupt byte ended the receiver waterfall; Bluetooth scanners could be stopped by a nearby device's name.",
+            "Fix: several modes reported a missing tool as a vague server error, or a failed start as success; they now name the tool.",
+            "Fix: Meshtastic with no USB device reported itself running, and with two serial ports could shut the server down.",
+        ],
+    },
+    {
+        "version": "2.33.11",
+        "date": "September 2026",
+        "highlights": [
+            "Feat: TSCM Survey workspace (Intel > TSCM Survey). One page walks a survey in order: the active baseline and its health, what the latest sweep shows that the baseline did not, known devices, threats and findings, then the report.",
+            "Fix: a TSCM baseline's age read hours too old outside UTC, and comparing a sweep that had not finished failed with a server error.",
+        ],
+    },
+    {
+        "version": "2.33.10",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: TSCM reports now assess each finding's signal from what was observed; every finding previously read 'Minimal, Low confidence'.",
+            "Fix: the TSCM CSV annex listed every device as informational with risk score 0, and could carry spreadsheet formulas from device names.",
+            "Fix: a TSCM report for a running or aborted sweep failed with a server error; sweep times were shown in UTC beside a local 'Generated' time.",
+            "Fix: a TSCM sweep that detected nothing is now reported as INCONCLUSIVE, not as a clean LOW, and an enabled Wi-Fi or Bluetooth band that saw no devices is called out.",
+            "Change: the TSCM client report states what was measured (dBm, time observed, sightings) and the pattern seen, instead of a confidence label, a proximity guess and a risk score. The technical annexes keep those values.",
+        ],
+    },
+    {
+        "version": "2.33.9",
+        "date": "September 2026",
+        "highlights": [
+            "Feat: name your SDRs. Settings > SDR gives each receiver a display name that replaces 'Device 0' in every device selector (#269).",
+            "Feat: per-device PPM correction, default gain and bias-T. A mode uses them whenever its own field is left blank; a value entered in the mode still wins (#238).",
+            "Fix: rtlamr passed PPM correction to rtl_tcp as its listen port.",
+        ],
+    },
+    {
+        "version": "2.33.8",
+        "date": "September 2026",
+        "highlights": [
+            "Security: an account seeded with a password you did not choose now has to set one before the interface is usable. New installs, and any install still using the old admin/admin default, are prompted at first login.",
+            "Feat: a Change Password page, reachable at /change-password whether or not a change is required.",
+        ],
+    },
+    {
+        "version": "2.33.7",
+        "date": "September 2026",
+        "highlights": [
+            "Feat: Kill All Processes is now in the global nav, so it is reachable from every page instead of only the main dashboard's System panel.",
+        ],
+    },
+    {
+        "version": "2.33.6",
+        "date": "September 2026",
+        "highlights": [
+            "Security: the /controller/* API required no authentication at all \u2014 anyone who could reach the port could list remote agents, read their API keys, register or delete agents, and start or stop SDR hardware on remote nodes. It now requires a session, or an API key for agent push.",
+            "Security: agent API keys are no longer included in API responses.",
+            "Security: WebSocket endpoints now verify the session; a stale auth exemption for audio streaming was removed; the default admin password has been removed; session cookies set SameSite and HttpOnly explicitly.",
+            "Action required: if you run remote agents, each must now have an API key configured to push data.",
+        ],
+    },
+    {
+        "version": "2.33.5",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: Meshtastic nodes first heard via telemetry, text or routing packets did not appear until the page was reloaded \u2014 the node list only refreshed on position/nodeinfo packets.",
+        ],
+    },
+    {
+        "version": "2.33.4",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: ADS-B aircraft tracked via a remote agent never left the map \u2014 the agent kept every contact for the life of the scan and re-sent them on each poll, so they only cleared when the mode was stopped. Contacts now age out after 5 minutes, matching local mode.",
+        ],
+    },
+    {
+        "version": "2.33.3",
+        "date": "September 2026",
+        "highlights": [
+            "Feat: 433MHz sensor Units selector (Metric / Imperial / Native). Defaults to Metric, so temperatures now read in °C — pick Native to restore the previous per-device behaviour.",
+        ],
+    },
+    {
+        "version": "2.33.2",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: DSC call types and nature-of-distress labels were wrong — format specifiers 112/120 were swapped, so a routine individual call displayed as DISTRESS and a real mayday displayed as INDIVIDUAL. Nature-of-distress labels were shifted one position off every code.",
+        ],
+    },
+    {
+        "version": "2.33.1",
+        "date": "September 2026",
+        "highlights": [
+            "Fix: ACARS crashed with SIGILL in the amd64 Docker image — acarsdec was compiled with the build host's instruction set (AVX-512) and would not run on older CPUs. Pull the latest image to pick up the fix.",
+        ],
+    },
+    {
+        "version": "2.33.0",
+        "date": "August 2026",
+        "highlights": [
+            "Feat: CARTO API key setting (Settings > Map Tiles) removes the new watermark CARTO adds to unauthenticated tile requests — free key, no account needed",
+            "Fix: mode maps (Drone, SSTV, MeshCore, Meshtastic, WebSDR, Weather Satellite) no longer briefly flash unkeyed CartoDB tiles when Settings is already loaded",
+        ],
+    },
     {
         "version": "2.32.0",
         "date": "July 2026",
@@ -553,6 +1100,10 @@ GITHUB_REPO = _get_env("GITHUB_REPO", "smittix/intercept")
 UPDATE_CHECK_ENABLED = _get_env_bool("UPDATE_CHECK_ENABLED", True)
 UPDATE_CHECK_INTERVAL_HOURS = _get_env_int("UPDATE_CHECK_INTERVAL_HOURS", 6)
 
+# Activity feed observations: how long they are kept, and a ceiling on rows
+OBSERVATION_RETENTION_HOURS = _get_env_float("OBSERVATION_RETENTION_HOURS", 24.0)
+OBSERVATION_MAX_ROWS = _get_env_int("OBSERVATION_MAX_ROWS", 100_000)
+
 # Alerting
 ALERT_WEBHOOK_URL = _get_env("ALERT_WEBHOOK_URL", "")
 ALERT_WEBHOOK_SECRET = _get_env("ALERT_WEBHOOK_SECRET", "")
@@ -572,9 +1123,13 @@ COT_PORT = _get_env_int("COT_PORT", 6969)
 COT_PROTO = _get_env("COT_PROTO", "udp")  # udp or tcp
 COT_STALE_SECONDS = _get_env_int("COT_STALE_SECONDS", 60)
 
-# Admin credentials
+# Admin credentials.
+# ADMIN_PASSWORD has no default on purpose. When it is unset, first-run
+# database init generates a random password, logs it, and writes it to
+# instance/.initial_password. A shipped default of "admin" meant every
+# install that never set the env var shared the same known credentials.
 ADMIN_USERNAME = _get_env("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = _get_env("ADMIN_PASSWORD", "admin")
+ADMIN_PASSWORD = _get_env("ADMIN_PASSWORD", "")
 
 # Signal identification region (affects match ranking; does not filter results)
 # Valid values: GLOBAL, EU, US, UK, AU

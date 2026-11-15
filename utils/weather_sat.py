@@ -105,6 +105,17 @@ try:
 except ImportError:
     DEFAULT_SAMPLE_RATE = 2400000  # 2.4 MHz — minimum for Meteor LRPT
 
+# INTERCEPT sdr_type -> SatDump live "--source" plugin name. Only sources
+# SatDump supports natively are listed; other SDR types are rejected upstream.
+# (2.4 MHz DEFAULT_SAMPLE_RATE is >= HackRF's 2 MSps minimum, so it's safe.)
+SATDUMP_SOURCES = {
+    "rtlsdr": "rtlsdr",
+    "hackrf": "hackrf",
+    "airspy": "airspy",
+    "airspyhf": "airspyhf",
+    "sdrplay": "sdrplay",
+}
+
 
 @dataclass
 class WeatherSatImage:
@@ -208,7 +219,13 @@ class WeatherSatDecoder:
 
     @property
     def decoder_available(self) -> str | None:
-        """Return name of available decoder or None."""
+        """Return name of available decoder or None.
+
+        A miss is checked again, so installing SatDump takes effect without
+        restarting iNTERCEPT.
+        """
+        if self._decoder is None:
+            self._decoder = self._detect_decoder()
         return self._decoder
 
     @property
@@ -277,7 +294,7 @@ class WeatherSatDecoder:
             if self._running:
                 return True, None
 
-            if not self._decoder:
+            if not self.decoder_available:
                 logger.error("No weather satellite decoder available")
                 msg = "SatDump not installed. Build from source or install via package manager."
                 self._emit_progress(
@@ -394,6 +411,7 @@ class WeatherSatDecoder:
         bias_t: bool = False,
         rtl_tcp_host: str | None = None,
         rtl_tcp_port: int = 1234,
+        sdr_type: str = "rtlsdr",
     ) -> tuple[bool, str | None]:
         """Start weather satellite capture and decode.
 
@@ -424,14 +442,15 @@ class WeatherSatDecoder:
 
         # Resolve device ID BEFORE lock — this runs rtl_test which can
         # take up to 5s and has no side effects on instance state.
-        # Skip for remote rtl_tcp connections.
-        source_id = None if rtl_tcp_host else self._resolve_device_id(device_index)
+        # Skip for remote rtl_tcp and non-RTL-SDR hardware (rtl_test only
+        # knows RTL-SDR; SatDump picks the first matching device instead).
+        source_id = None if (rtl_tcp_host or sdr_type != "rtlsdr") else self._resolve_device_id(device_index)
 
         with self._lock:
             if self._running:
                 return True, None
 
-            if not self._decoder:
+            if not self.decoder_available:
                 logger.error("No weather satellite decoder available")
                 msg = "SatDump not installed. Build from source or install via package manager."
                 self._emit_progress(
@@ -461,6 +480,7 @@ class WeatherSatDecoder:
                     sample_rate,
                     bias_t,
                     source_id,
+                    sdr_type=sdr_type,
                     rtl_tcp_host=rtl_tcp_host,
                     rtl_tcp_port=rtl_tcp_port,
                 )
@@ -505,6 +525,7 @@ class WeatherSatDecoder:
         source_id: str | None = None,
         rtl_tcp_host: str | None = None,
         rtl_tcp_port: int = 1234,
+        sdr_type: str = "rtlsdr",
     ) -> None:
         """Start SatDump live capture and decode."""
         # Create timestamped output directory for this capture
@@ -548,7 +569,7 @@ class WeatherSatDecoder:
                 sat_info["pipeline"],
                 str(self._capture_output_dir),
                 "--source",
-                "rtlsdr",
+                SATDUMP_SOURCES.get(sdr_type, "rtlsdr"),
                 "--samplerate",
                 str(sample_rate),
                 "--frequency",
@@ -1224,7 +1245,7 @@ class WeatherSatDecoder:
             elapsed = int(time.time() - self._capture_start_time)
 
         return {
-            "available": self._decoder is not None,
+            "available": self.decoder_available is not None,
             "decoder": self._decoder,
             "running": self._running,
             "satellite": self._current_satellite,

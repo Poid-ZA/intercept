@@ -108,8 +108,15 @@ class RFDetector:
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             register_process(proc)
+            # stop() may have run while this thread was starting; it only
+            # terminates processes already published under the lock.
             with self._proc_lock:
-                self._rtl_proc = proc
+                stopped = self._stop_event.is_set()
+                if not stopped:
+                    self._rtl_proc = proc
+            if stopped:
+                safe_terminate(proc)
+                return
             for raw_line in iter(proc.stdout.readline, b""):
                 if self._stop_event.is_set():
                     break
@@ -127,8 +134,15 @@ class RFDetector:
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
             register_process(proc)
+            # stop() may have run while this thread was starting; it only
+            # terminates processes already published under the lock.
             with self._proc_lock:
-                self._hackrf_proc = proc
+                stopped = self._stop_event.is_set()
+                if not stopped:
+                    self._hackrf_proc = proc
+            if stopped:
+                safe_terminate(proc)
+                return
             for raw_line in iter(proc.stdout.readline, b""):
                 if self._stop_event.is_set():
                     break
@@ -137,13 +151,15 @@ class RFDetector:
         except Exception as exc:
             logger.warning("hackrf_sweep error: %s", exc)
 
-    def start(self, rtl_sdr_index: int = 0, use_hackrf: bool = True) -> None:
+    def start(self, rtl_sdr_index: int | None = 0, use_hackrf: bool = True) -> None:
+        """Start rtl_433 on rtl_sdr_index (None: not at all) and, if asked, hackrf_sweep."""
         if self.running:
             return
         self._stop_event.clear()
-        t1 = threading.Thread(target=self._run_rtl433, args=(rtl_sdr_index,), daemon=True)
-        t1.start()
-        self._threads.append(t1)
+        if rtl_sdr_index is not None:
+            t1 = threading.Thread(target=self._run_rtl433, args=(rtl_sdr_index,), daemon=True)
+            t1.start()
+            self._threads.append(t1)
         if use_hackrf:
             t2 = threading.Thread(target=self._run_hackrf, daemon=True)
             t2.start()

@@ -942,6 +942,23 @@ class UnifiedWiFiScanner:
                 except Exception as e:
                     logger.debug(f"Network callback error: {e}")
 
+        # Activity feed, at ingestion: every v2 scan backend passes through here.
+        # Not direct: the legacy /wifi stream reaches the feed only through
+        # process_event(), and the SSE copy of this sighting has the same BSSID,
+        # so the per-identifier interval absorbs it.
+        try:
+            from utils.observations import emit_observation
+
+            emit_observation(
+                "wifi",
+                bssid,
+                rssi=obs.rssi,
+                summary=obs.essid or "(hidden)",
+                raw={"bssid": bssid, "essid": obs.essid, "channel": obs.channel, "rssi": obs.rssi},
+            )
+        except Exception as e:
+            logger.debug(f"Observation emit failed: {e}")
+
     def _create_access_point(self, obs: WiFiObservation) -> WiFiAccessPoint:
         """Create new access point from observation."""
         now = datetime.now()
@@ -1258,7 +1275,11 @@ class UnifiedWiFiScanner:
     # =========================================================================
 
     def _queue_event(self, event: dict):
-        """Add event to the SSE queue."""
+        """Add event to the SSE queue, and send it through the event
+        pipeline once, whether or not a browser is subscribed."""
+        from utils.event_pipeline import submit
+
+        submit("wifi", event, event.get("type"))
         try:
             self._event_queue.put_nowait(event)
         except queue.Full:
@@ -1270,15 +1291,23 @@ class UnifiedWiFiScanner:
                 pass
 
     def get_event_stream(self) -> Generator[dict, None, None]:
-        """Generate events for SSE streaming."""
-        while True:
-            try:
-                event = self._event_queue.get(timeout=1.0)
-                yield event
-            except queue.Empty:
-                yield {"type": "keepalive"}
-            except Exception:
-                break
+        """Generate events for one SSE client.
+
+        Each client gets every event through the shared fan-out. Reading the
+        scanner's queue directly made open tabs compete for events, so with
+        two tabs each saw about half.
+        """
+        from utils.sse import subscribe_fanout_queue
+
+        subscriber, unsubscribe = subscribe_fanout_queue(self._event_queue, "wifi_v2")
+        try:
+            while True:
+                try:
+                    yield subscriber.get(timeout=1.0)
+                except queue.Empty:
+                    yield {"type": "keepalive"}
+        finally:
+            unsubscribe()
 
     # =========================================================================
     # Baseline Management
